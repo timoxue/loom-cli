@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -113,6 +114,114 @@ func (v *ShadowVFS) MarkDeleted(requestedPath string) error {
 	}
 
 	return nil
+}
+
+// ChangeOp names the kind of mutation recorded in a shadow manifest entry.
+type ChangeOp string
+
+const (
+	ChangeOpWrite  ChangeOp = "write"
+	ChangeOpDelete ChangeOp = "delete"
+)
+
+// Change records a single filesystem mutation inside the shadow tree. The
+// Path is workspace-relative and forward-slash normalized for display and
+// hash stability.
+type Change struct {
+	Op   ChangeOp
+	Path string
+}
+
+// Manifest walks the shadow tree and returns the full set of pending
+// mutations. Write entries are file paths that will be promoted on commit;
+// delete entries correspond to tombstones. The shadow metadata namespace
+// itself is excluded.
+func (v *ShadowVFS) Manifest() ([]Change, error) {
+	_, shadowRoot, err := v.normalizedRoots()
+	if err != nil {
+		return nil, err
+	}
+
+	changes := make([]Change, 0, 8)
+
+	shadowInfo, err := os.Stat(shadowRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return changes, nil
+		}
+		return nil, fmt.Errorf("stat shadow dir %q: %w", shadowRoot, err)
+	}
+	if !shadowInfo.IsDir() {
+		return nil, &ContractError{
+			Field:  "shadow_dir",
+			Reason: fmt.Sprintf("shadow path %q is not a directory", shadowRoot),
+		}
+	}
+
+	tombstoneRoot := tombstoneRootPath(shadowRoot)
+
+	if err := filepath.WalkDir(shadowRoot, func(currentPath string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return fmt.Errorf("walk shadow path %q: %w", currentPath, walkErr)
+		}
+		if currentPath == shadowRoot {
+			return nil
+		}
+		if currentPath == filepath.Join(shadowRoot, shadowMetadataDirName) {
+			return filepath.SkipDir
+		}
+		if entry.IsDir() {
+			return nil
+		}
+
+		relative, err := filepath.Rel(shadowRoot, currentPath)
+		if err != nil {
+			return fmt.Errorf("derive shadow relative path for %q: %w", currentPath, err)
+		}
+		changes = append(changes, Change{
+			Op:   ChangeOpWrite,
+			Path: filepath.ToSlash(filepath.Clean(relative)),
+		})
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	if _, err := os.Stat(tombstoneRoot); err == nil {
+		if err := filepath.WalkDir(tombstoneRoot, func(currentPath string, entry os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return fmt.Errorf("walk tombstone path %q: %w", currentPath, walkErr)
+			}
+			if entry.IsDir() {
+				return nil
+			}
+			relativeMarker, err := filepath.Rel(tombstoneRoot, currentPath)
+			if err != nil {
+				return fmt.Errorf("derive tombstone relative path for %q: %w", currentPath, err)
+			}
+			if !strings.HasSuffix(relativeMarker, tombstoneFileSuffix) {
+				return nil
+			}
+			relative := strings.TrimSuffix(relativeMarker, tombstoneFileSuffix)
+			changes = append(changes, Change{
+				Op:   ChangeOpDelete,
+				Path: filepath.ToSlash(filepath.Clean(relative)),
+			})
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("stat tombstone root %q: %w", tombstoneRoot, err)
+	}
+
+	sort.Slice(changes, func(i, j int) bool {
+		if changes[i].Op != changes[j].Op {
+			return changes[i].Op < changes[j].Op
+		}
+		return changes[i].Path < changes[j].Path
+	})
+	return changes, nil
 }
 
 // Commit promotes shadow changes into the real workspace and removes the shadow tree on success.

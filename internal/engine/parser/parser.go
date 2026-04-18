@@ -31,12 +31,28 @@ func (e *SyntaxError) Error() string {
 }
 
 // ParseFile routes a skill document to the correct parser implementation based on file shape.
+//
+// Dispatch rules:
+//   - .loom.json (or any .json with schema_version=="v1") → V1JSONParser
+//   - .md → OpenClawParser (v0 legacy)
+//   - no extension → detect markdown heuristically, else reject
+//
+// v0 and v1 live side-by-side intentionally: older markdown skills remain
+// parseable (and therefore `verify`-able) but the executor refuses to run
+// anything lacking a v1 schema version.
 func ParseFile(filename string, rawContent []byte) (*engine.LoomSkill, error) {
-	extension := strings.ToLower(filepath.Ext(strings.TrimSpace(filename)))
-	switch extension {
-	case ".md":
+	trimmed := strings.TrimSpace(filename)
+	lower := strings.ToLower(trimmed)
+	extension := strings.ToLower(filepath.Ext(trimmed))
+
+	switch {
+	case strings.HasSuffix(lower, ".loom.json"):
+		return (&V1JSONParser{}).Parse(rawContent)
+	case extension == ".json":
+		return (&V1JSONParser{}).Parse(rawContent)
+	case extension == ".md":
 		return (&OpenClawParser{}).Parse(rawContent)
-	case "":
+	case extension == "":
 		if looksLikeOpenClaw(rawContent) {
 			return (&OpenClawParser{}).Parse(rawContent)
 		}

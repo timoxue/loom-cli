@@ -21,7 +21,8 @@ func TestCompilerCompileAndSetupCreatesShadowVFSAndReceipt(t *testing.T) {
 	}
 
 	skill := &LoomSkill{
-		SkillID: "demo_cleaner",
+		SchemaVersion: CurrentSchemaVersion,
+		SkillID:       "demo_writefile",
 		Parameters: map[string]Parameter{
 			"target": {
 				Type:     ParameterTypeString,
@@ -34,16 +35,15 @@ func TestCompilerCompileAndSetupCreatesShadowVFSAndReceipt(t *testing.T) {
 		},
 		ExecutionDAG: []Step{
 			{
-				StepID: "step_1",
-				Action: "render",
-				Inputs: map[string]string{
-					"target": "${target}",
-				},
+				StepID:  "step_1",
+				Kind:    StepKindWriteFile,
+				Args:    WriteFileArgs{Path: "out/report.txt", Content: "hello"},
+				Inputs:  map[string]string{"target": "${target}"},
 				Outputs: []string{"output_1"},
 			},
 		},
-		Permissions: map[string][]string{
-			"fs.read": {"./tmp"},
+		Capabilities: []Capability{
+			{Kind: CapKindVFSWrite, Scope: "out/"},
 		},
 	}
 
@@ -76,7 +76,7 @@ func TestCompilerCompileAndSetupCreatesShadowVFSAndReceipt(t *testing.T) {
 		t.Fatalf("sanitized retries = %#v, want 2", sanitizedInputs["retries"])
 	}
 
-	receiptPath := filepath.Join(homeDir, ".loom", "cache", "demo_cleaner", "session-001_receipt.json")
+	receiptPath := filepath.Join(homeDir, ".loom", "cache", "demo_writefile", "session-001_receipt.json")
 	receiptBytes, err := os.ReadFile(receiptPath)
 	if err != nil {
 		t.Fatalf("ReadFile(receipt) error = %v", err)
@@ -89,14 +89,20 @@ func TestCompilerCompileAndSetupCreatesShadowVFSAndReceipt(t *testing.T) {
 	if receipt.SessionID != "session-001" {
 		t.Fatalf("receipt.SessionID = %q, want session-001", receipt.SessionID)
 	}
-	if receipt.SkillID != "demo_cleaner" {
-		t.Fatalf("receipt.SkillID = %q, want demo_cleaner", receipt.SkillID)
+	if receipt.SkillID != "demo_writefile" {
+		t.Fatalf("receipt.SkillID = %q, want demo_writefile", receipt.SkillID)
+	}
+	if receipt.SchemaVersion != CurrentSchemaVersion {
+		t.Fatalf("receipt.SchemaVersion = %q, want %q", receipt.SchemaVersion, CurrentSchemaVersion)
 	}
 	if receipt.LogicalHash != skill.GetLogicalHash() {
 		t.Fatalf("receipt.LogicalHash = %q, want %q", receipt.LogicalHash, skill.GetLogicalHash())
 	}
 	if receipt.ShadowPath != wantShadowDir {
 		t.Fatalf("receipt.ShadowPath = %q, want %q", receipt.ShadowPath, wantShadowDir)
+	}
+	if len(receipt.GrantedCapabilities) != 1 || receipt.GrantedCapabilities[0].Kind != CapKindVFSWrite {
+		t.Fatalf("receipt.GrantedCapabilities = %#v, want single vfs.write cap", receipt.GrantedCapabilities)
 	}
 }
 
@@ -112,15 +118,17 @@ func TestCompilerCompileAndSetupCleansShadowDirOnFailure(t *testing.T) {
 	}
 
 	skill := &LoomSkill{
-		SkillID: "dangerous_skill",
+		SchemaVersion: CurrentSchemaVersion,
+		SkillID:       "dangerous_skill",
 		ExecutionDAG: []Step{
 			{
 				StepID: "step_1",
-				Action: "shell",
-				Inputs: map[string]string{
-					"command": "rm -rf /tmp/demo",
-				},
+				Kind:   StepKindWriteFile,
+				Args:   WriteFileArgs{Path: "out/payload.sh", Content: "rm -rf /tmp/demo"},
 			},
+		},
+		Capabilities: []Capability{
+			{Kind: CapKindVFSWrite, Scope: "out/"},
 		},
 	}
 
@@ -146,7 +154,8 @@ func TestCompilerCompileAndSetupRejectsUnsafeSessionID(t *testing.T) {
 	}
 
 	skill := &LoomSkill{
-		SkillID: "safe_skill",
+		SchemaVersion: CurrentSchemaVersion,
+		SkillID:       "safe_skill",
 	}
 
 	if _, _, err := compiler.CompileAndSetup(skill, nil, "../escape"); err == nil {

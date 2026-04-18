@@ -74,7 +74,7 @@ func ValidateSkill(skill *LoomSkill, policy *security.SecurityPolicy) error {
 		}
 	}
 
-	if err := auditPermissions(skill.Permissions); err != nil {
+	if err := auditCapabilities(skill); err != nil {
 		return err
 	}
 
@@ -112,27 +112,55 @@ func validateStepDataflow(step Step, availableVariables map[string]struct{}) err
 	return nil
 }
 
-func auditPermissions(permissions map[string][]string) error {
-	permissionNames := make([]string, 0, len(permissions))
-	for permissionName := range permissions {
-		permissionNames = append(permissionNames, permissionName)
-	}
-	sort.Strings(permissionNames)
-
-	for _, permissionName := range permissionNames {
-		for _, scope := range permissions[permissionName] {
-			if !isHighRiskPermissionScope(scope) {
-				continue
-			}
-
+// auditCapabilities enforces the Capability-based security contract.
+//
+// First pass: any declared scope that maps to a high-risk filesystem root
+// (/, /etc, /root, /var) is refused outright. This matches pre-v1 policy so
+// high-risk declarations cannot smuggle through the schema change.
+//
+// Second pass (v1 only): for every Step, the capability set derived from
+// its Kind+Args must be covered by the declared capabilities. Declared
+// capabilities are an upper bound — they may only narrow. Any derived cap
+// whose scope is not prefix-covered by a declared cap of the same Kind is a
+// security violation.
+func auditCapabilities(skill *LoomSkill) error {
+	for _, capability := range skill.Capabilities {
+		if isHighRiskPermissionScope(capability.Scope) {
 			return &SecurityError{
-				Field:  permissionName,
-				Reason: fmt.Sprintf("requests high-risk filesystem scope %q", scope),
+				Field:  string(capability.Kind),
+				Reason: fmt.Sprintf("requests high-risk filesystem scope %q", capability.Scope),
+			}
+		}
+	}
+
+	if skill.SchemaVersion != CurrentSchemaVersion {
+		return nil
+	}
+
+	for _, step := range skill.ExecutionDAG {
+		for _, derived := range DefaultCapabilitiesFor(step) {
+			if !capabilityCovered(skill.Capabilities, derived) {
+				return &SecurityError{
+					Field:  step.StepID,
+					Reason: fmt.Sprintf("step requires capability %s:%s that is not declared", derived.Kind, derived.Scope),
+				}
 			}
 		}
 	}
 
 	return nil
+}
+
+func capabilityCovered(declared []Capability, derived Capability) bool {
+	for _, decl := range declared {
+		if decl.Kind != derived.Kind {
+			continue
+		}
+		if ScopeCovers(decl.Scope, derived.Scope) {
+			return true
+		}
+	}
+	return false
 }
 
 func auditStepSecurity(step Step, policy *security.SecurityPolicy, blockedPrefixes []netip.Prefix) error {
@@ -314,13 +342,39 @@ func extractAddressCandidates(value string) []netip.Addr {
 	return addresses
 }
 
+// collectStaticSegments returns the string surfaces of a Step that static
+// scanners (dangerous-command, SSRF) should inspect. For v0 legacy steps the
+// natural-language action text is included. For v1 typed args, the path and
+// content of file ops are included so existing rules still catch literal
+// dangerous tokens smuggled through a file-write.
 func collectStaticSegments(step Step) []staticSegment {
-	segments := make([]staticSegment, 0, len(step.Inputs)+1)
-	segments = append(segments, staticSegment{
-		Kind:  "action",
-		Name:  "action",
-		Value: step.Action,
-	})
+	segments := make([]staticSegment, 0, len(step.Inputs)+2)
+
+	switch args := step.Args.(type) {
+	case LegacyStepArgs:
+		segments = append(segments, staticSegment{
+			Kind:  "action",
+			Name:  "action",
+			Value: args.Action,
+		})
+	case ReadFileArgs:
+		segments = append(segments, staticSegment{
+			Kind:  "args",
+			Name:  "path",
+			Value: args.Path,
+		})
+	case WriteFileArgs:
+		segments = append(segments, staticSegment{
+			Kind:  "args",
+			Name:  "path",
+			Value: args.Path,
+		})
+		segments = append(segments, staticSegment{
+			Kind:  "args",
+			Name:  "content",
+			Value: args.Content,
+		})
+	}
 
 	inputNames := make([]string, 0, len(step.Inputs))
 	for inputName := range step.Inputs {

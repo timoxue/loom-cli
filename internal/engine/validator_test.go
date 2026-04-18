@@ -7,33 +7,32 @@ import (
 	"github.com/yourname/loom-cli/internal/security"
 )
 
-func TestValidateSkillAcceptsValidDataflow(t *testing.T) {
+func TestValidateSkillAcceptsValidDataflowV1(t *testing.T) {
 	t.Parallel()
 
 	skill := &LoomSkill{
+		SchemaVersion: CurrentSchemaVersion,
 		Parameters: map[string]Parameter{
 			"prompt": {Type: ParameterTypeString, Required: true},
 		},
 		ExecutionDAG: []Step{
 			{
-				StepID: "step_1",
-				Action: "render",
-				Inputs: map[string]string{
-					"text": "${prompt}",
-				},
+				StepID:  "step_1",
+				Kind:    StepKindWriteFile,
+				Args:    WriteFileArgs{Path: "workspace/out.txt", Content: "${prompt}"},
+				Inputs:  map[string]string{"text": "${prompt}"},
 				Outputs: []string{"output_1"},
 			},
 			{
 				StepID: "step_2",
-				Action: "store",
-				Inputs: map[string]string{
-					"body": "${output_1}",
-				},
-				Outputs: []string{"final_result"},
+				Kind:   StepKindReadFile,
+				Args:   ReadFileArgs{Path: "workspace/out.txt"},
+				Inputs: map[string]string{"body": "${output_1}"},
 			},
 		},
-		Permissions: map[string][]string{
-			"fs.read": {"./workspace"},
+		Capabilities: []Capability{
+			{Kind: CapKindVFSRead, Scope: "workspace/"},
+			{Kind: CapKindVFSWrite, Scope: "workspace/"},
 		},
 	}
 
@@ -46,16 +45,16 @@ func TestValidateSkillRejectsUndeclaredDependency(t *testing.T) {
 	t.Parallel()
 
 	skill := &LoomSkill{
-		Parameters: map[string]Parameter{},
+		SchemaVersion: CurrentSchemaVersion,
 		ExecutionDAG: []Step{
 			{
 				StepID: "step_2",
-				Action: "store",
-				Inputs: map[string]string{
-					"body": "${output_1}",
-				},
+				Kind:   StepKindWriteFile,
+				Args:   WriteFileArgs{Path: "out/body.txt", Content: "${output_1}"},
+				Inputs: map[string]string{"body": "${output_1}"},
 			},
 		},
+		Capabilities: []Capability{{Kind: CapKindVFSWrite, Scope: "out/"}},
 	}
 
 	err := ValidateSkill(skill, security.DefaultPolicy())
@@ -72,12 +71,13 @@ func TestValidateSkillRejectsUndeclaredDependency(t *testing.T) {
 	}
 }
 
-func TestValidateSkillRejectsHighRiskPermission(t *testing.T) {
+func TestValidateSkillRejectsHighRiskCapabilityScope(t *testing.T) {
 	t.Parallel()
 
 	skill := &LoomSkill{
-		Permissions: map[string][]string{
-			"fs.read": {"/etc"},
+		SchemaVersion: CurrentSchemaVersion,
+		Capabilities: []Capability{
+			{Kind: CapKindVFSRead, Scope: "/etc"},
 		},
 	}
 
@@ -90,19 +90,52 @@ func TestValidateSkillRejectsHighRiskPermission(t *testing.T) {
 	if !errors.As(err, &securityErr) {
 		t.Fatalf("error = %T, want *SecurityError", err)
 	}
-	if securityErr.Field != "fs.read" {
-		t.Fatalf("securityErr.Field = %q, want fs.read", securityErr.Field)
+	if securityErr.Field != string(CapKindVFSRead) {
+		t.Fatalf("securityErr.Field = %q, want %q", securityErr.Field, CapKindVFSRead)
 	}
 }
 
-func TestValidateSkillRejectsDangerousCommand(t *testing.T) {
+func TestValidateSkillRejectsStepExceedingDeclaredCapabilityScope(t *testing.T) {
 	t.Parallel()
 
 	skill := &LoomSkill{
+		SchemaVersion: CurrentSchemaVersion,
 		ExecutionDAG: []Step{
 			{
 				StepID: "step_1",
-				Action: "shell",
+				Kind:   StepKindWriteFile,
+				Args:   WriteFileArgs{Path: "other/secret.txt", Content: "x"},
+			},
+		},
+		Capabilities: []Capability{
+			{Kind: CapKindVFSWrite, Scope: "out/"},
+		},
+	}
+
+	err := ValidateSkill(skill, security.DefaultPolicy())
+	if err == nil {
+		t.Fatal("ValidateSkill() error = nil, want security error")
+	}
+
+	var securityErr *SecurityError
+	if !errors.As(err, &securityErr) {
+		t.Fatalf("error = %T, want *SecurityError", err)
+	}
+	if securityErr.Field != "step_1" {
+		t.Fatalf("securityErr.Field = %q, want step_1", securityErr.Field)
+	}
+}
+
+func TestValidateSkillRejectsDangerousCommandInLegacyStep(t *testing.T) {
+	t.Parallel()
+
+	skill := &LoomSkill{
+		// v0 legacy skill — action text is still scanned.
+		ExecutionDAG: []Step{
+			{
+				StepID: "step_1",
+				Kind:   StepKindLegacy,
+				Args:   LegacyStepArgs{Action: "shell"},
 				Inputs: map[string]string{
 					"command": "rm -rf /tmp/demo",
 				},
@@ -124,14 +157,15 @@ func TestValidateSkillRejectsDangerousCommand(t *testing.T) {
 	}
 }
 
-func TestValidateSkillRejectsBlockedSSRFAddress(t *testing.T) {
+func TestValidateSkillRejectsBlockedSSRFAddressInLegacyStep(t *testing.T) {
 	t.Parallel()
 
 	skill := &LoomSkill{
 		ExecutionDAG: []Step{
 			{
 				StepID: "step_1",
-				Action: "fetch",
+				Kind:   StepKindLegacy,
+				Args:   LegacyStepArgs{Action: "fetch"},
 				Inputs: map[string]string{
 					"url": "http://169.254.169.254/latest/meta-data",
 				},

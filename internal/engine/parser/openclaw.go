@@ -60,12 +60,65 @@ func (p *OpenClawParser) Parse(rawContent []byte) (*engine.LoomSkill, error) {
 		return nil, err
 	}
 
+	capabilities, err := capabilitiesFromPermissions(permissions)
+	if err != nil {
+		return nil, err
+	}
+
 	return &engine.LoomSkill{
-		SkillID:      skillID,
-		Parameters:   parameters,
-		ExecutionDAG: executionDAG,
-		Permissions:  permissions,
+		SchemaVersion: "",
+		SkillID:       skillID,
+		Parameters:    parameters,
+		ExecutionDAG:  executionDAG,
+		Capabilities:  capabilities,
 	}, nil
+}
+
+func capabilitiesFromPermissions(permissions map[string][]string) ([]engine.Capability, error) {
+	capabilities := make([]engine.Capability, 0, len(permissions))
+	for _, name := range sortedPermissionNames(permissions) {
+		kind, err := permissionNameToCapabilityKind(name)
+		if err != nil {
+			return nil, err
+		}
+		for _, scope := range permissions[name] {
+			capabilities = append(capabilities, engine.Capability{
+				Kind:  kind,
+				Scope: scope,
+			})
+		}
+	}
+	return capabilities, nil
+}
+
+func permissionNameToCapabilityKind(name string) (engine.CapabilityKind, error) {
+	switch name {
+	case "fs.read":
+		return engine.CapKindVFSRead, nil
+	case "fs.write":
+		return engine.CapKindVFSWrite, nil
+	default:
+		return "", &SyntaxError{
+			Reason: fmt.Sprintf("unsupported permission name %q (v0 parser accepts fs.read and fs.write only)", name),
+		}
+	}
+}
+
+func sortedPermissionNames(permissions map[string][]string) []string {
+	names := make([]string, 0, len(permissions))
+	for name := range permissions {
+		names = append(names, name)
+	}
+	sortStrings(names)
+	return names
+}
+
+func sortStrings(values []string) {
+	for i := 1; i < len(values); i++ {
+		for j := i; j > 0 && values[j-1] > values[j]; j-- {
+			values[j-1], values[j] = values[j], values[j-1]
+		}
+	}
 }
 
 func normalizeMarkdown(rawContent []byte) string {
@@ -291,7 +344,8 @@ func parseInstructions(sectionLines []string, startLine int) ([]engine.Step, err
 
 		steps = append(steps, engine.Step{
 			StepID:  fmt.Sprintf("step_%d", expectedIndex),
-			Action:  actionText,
+			Kind:    engine.StepKindLegacy,
+			Args:    engine.LegacyStepArgs{Action: actionText},
 			Inputs:  parseInstructionInputs(actionText),
 			Outputs: nil,
 		})

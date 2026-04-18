@@ -1,0 +1,19 @@
+{
+  "schema_version": "v1",
+  "skill_id": "demo_writefile",
+  "parameters": {
+    "msg": {"type": "string", "default_value": "hi", "required": false}
+  },
+  "execution_dag": [
+    {
+      "step_id": "s1",
+      "kind": "write_file",
+      "args": {"path": "out/hello.txt", "content": "hi"},
+      "inputs": {"msg": "${msg}"},
+      "outputs": []
+    }
+  ],
+  "capabilities": [
+    {"kind": "vfs.write", "scope": "out/"}
+  ]
+}

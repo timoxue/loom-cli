@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -37,8 +38,92 @@ func newRootCmd() *cobra.Command {
 	}
 
 	rootCmd.AddCommand(newVerifyCmd())
+	rootCmd.AddCommand(newRunCmd())
 	rootCmd.AddCommand(newServeCmd())
 	return rootCmd
+}
+
+// newRunCmd exposes the v1 end-to-end execution path: parse → compile →
+// executor → commit-gate manifest. The commit gate today prints the shadow
+// manifest and stops; it never promotes bytes into the real workspace.
+func newRunCmd() *cobra.Command {
+	var inputFlags []string
+
+	runCmd := &cobra.Command{
+		Use:   "run <skill_file_path>",
+		Short: "Execute a v1 skill inside an isolated shadow workspace",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			skillFilePath := args[0]
+
+			rawContent, err := os.ReadFile(skillFilePath)
+			if err != nil {
+				return fmt.Errorf("read skill file %q: %w", skillFilePath, err)
+			}
+
+			skill, err := parser.ParseFile(skillFilePath, rawContent)
+			if err != nil {
+				return err
+			}
+
+			if skill.SchemaVersion != engine.CurrentSchemaVersion {
+				return fmt.Errorf("schema %q is not executable; run requires schema_version=%q", skill.SchemaVersion, engine.CurrentSchemaVersion)
+			}
+
+			policy := security.DefaultPolicy()
+			compiler := &engine.Compiler{
+				Policy:        policy,
+				WorkspaceRoot: ".",
+			}
+
+			sessionID, err := newSessionID()
+			if err != nil {
+				return err
+			}
+
+			rawInputs, err := parseInputFlags(inputFlags)
+			if err != nil {
+				return err
+			}
+
+			vfs, sanitizedInputs, err := compiler.CompileAndSetup(skill, rawInputs, sessionID)
+			if err != nil {
+				return err
+			}
+
+			executor := &engine.Executor{VFS: vfs}
+			manifest, execErr := executor.Execute(context.Background(), skill, sanitizedInputs)
+
+			engine.PrintManifest(os.Stdout, manifest)
+
+			if execErr != nil {
+				return execErr
+			}
+
+			printSuccess(
+				fmt.Sprintf("\u2705 Skill executed inside shadow workspace"),
+				fmt.Sprintf("\U0001F511 Skill ID: %s", skill.SkillID),
+				fmt.Sprintf("\U0001F6E1\uFE0F  Logical Hash: %s", skill.GetLogicalHash()),
+				fmt.Sprintf("\U0001F4C2 Shadow Path: %s", vfs.ShadowDir),
+			)
+			return nil
+		},
+	}
+
+	runCmd.Flags().StringSliceVar(&inputFlags, "input", nil, "repeatable key=value input pair")
+	return runCmd
+}
+
+func parseInputFlags(flags []string) (map[string]string, error) {
+	inputs := make(map[string]string, len(flags))
+	for _, flag := range flags {
+		idx := strings.IndexByte(flag, '=')
+		if idx <= 0 {
+			return nil, fmt.Errorf("invalid --input %q: expected key=value", flag)
+		}
+		inputs[flag[:idx]] = flag[idx+1:]
+	}
+	return inputs, nil
 }
 
 func newVerifyCmd() *cobra.Command {

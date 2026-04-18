@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -166,6 +167,99 @@ func sanitizeParameterValue(name, rawValue string, parameter Parameter) (any, er
 			Reason: fmt.Sprintf("unsupported parameter type %q", parameter.Type),
 		}
 	}
+}
+
+// SanitizeShadowRelPath normalizes a caller-supplied path and guarantees it
+// stays inside the shadow root. It is the only approved gateway for turning
+// untrusted path strings into executor-visible relative paths.
+//
+// Rejection criteria: empty input, absolute paths, Windows drive prefixes,
+// and any clean form whose relative-to-shadow path climbs out via "..". The
+// returned path is normalized with forward slashes for manifest stability.
+func SanitizeShadowRelPath(shadowDir, rawPath string) (string, error) {
+	trimmed := strings.TrimSpace(rawPath)
+	if trimmed == "" {
+		return "", &ContractError{
+			Field:  "path",
+			Reason: "path must not be empty",
+		}
+	}
+
+	shadowRoot, err := normalizeRootPath(shadowDir)
+	if err != nil {
+		return "", &ContractError{
+			Field:  "shadow_dir",
+			Reason: err.Error(),
+		}
+	}
+
+	relativePath, err := sanitizeCallerRelativePath(rawPath, shadowRoot)
+	if err != nil {
+		return "", err
+	}
+
+	return filepath.ToSlash(relativePath), nil
+}
+
+// sanitizeCallerRelativePath mirrors resolveManagedRelativePath but scopes
+// the acceptance test to the shadow root only. The sanitizer must reject
+// before the executor ever invokes ShadowVFS.
+func sanitizeCallerRelativePath(rawPath, shadowRoot string) (string, error) {
+	normalized := filepath.Clean(filepath.FromSlash(strings.TrimSpace(rawPath)))
+
+	if filepath.VolumeName(normalized) != "" && !filepath.IsAbs(normalized) {
+		return "", &SecurityError{
+			Field:  rawPath,
+			Reason: "drive-qualified relative paths are not allowed",
+		}
+	}
+
+	if filepath.IsAbs(normalized) {
+		return "", &SecurityError{
+			Field:  rawPath,
+			Reason: "absolute paths are not allowed inside the shadow root",
+		}
+	}
+
+	// On Windows, a leading slash is "rooted" but not "absolute" (no drive).
+	// Treat it as an escape attempt so Unix-style /etc/passwd is rejected
+	// regardless of host OS.
+	if len(normalized) > 0 && (normalized[0] == '/' || normalized[0] == '\\') {
+		return "", &SecurityError{
+			Field:  rawPath,
+			Reason: "rooted paths are not allowed inside the shadow root",
+		}
+	}
+
+	candidate, err := joinWithinBase(shadowRoot, normalized)
+	if err != nil {
+		return "", &SecurityError{
+			Field:  rawPath,
+			Reason: "path escapes shadow root",
+		}
+	}
+
+	relative, err := filepath.Rel(shadowRoot, candidate)
+	if err != nil {
+		return "", &SecurityError{
+			Field:  rawPath,
+			Reason: fmt.Sprintf("resolve relative path: %v", err),
+		}
+	}
+	if relative == "." || relative == "" {
+		return "", &SecurityError{
+			Field:  rawPath,
+			Reason: "path must not address the shadow root itself",
+		}
+	}
+	if escapesBase(relative) {
+		return "", &SecurityError{
+			Field:  rawPath,
+			Reason: "path escapes shadow root",
+		}
+	}
+
+	return relative, nil
 }
 
 func rejectShellInjection(fieldName, value string) error {

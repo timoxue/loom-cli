@@ -19,12 +19,13 @@ type Compiler struct {
 
 // Receipt records the deterministic execution admission decision for a single session.
 type Receipt struct {
-	SessionID          string              `json:"session_id"`          // Stable execution session identifier chosen by the caller.
-	SkillID            string              `json:"skill_id"`            // Human-stable skill identity admitted for this execution.
-	LogicalHash        string              `json:"logical_hash"`        // Canonical semantic fingerprint used to bind runtime to audited behavior.
-	Timestamp          time.Time           `json:"timestamp"`           // UTC issuance time of the admission decision.
-	GrantedPermissions map[string][]string `json:"granted_permissions"` // Effective permissions granted to the execution session.
-	ShadowPath         string              `json:"shadow_path"`         // Isolated filesystem root assigned to absorb all writes.
+	SessionID           string       `json:"session_id"`
+	SkillID             string       `json:"skill_id"`
+	SchemaVersion       string       `json:"schema_version"`
+	LogicalHash         string       `json:"logical_hash"`
+	Timestamp           time.Time    `json:"timestamp"`
+	GrantedCapabilities []Capability `json:"granted_capabilities"`
+	ShadowPath          string       `json:"shadow_path"`
 }
 
 // CompileAndSetup validates the skill, sanitizes inputs, provisions a shadow workspace, and writes an execution receipt.
@@ -108,12 +109,13 @@ func (c *Compiler) CompileAndSetup(skill *LoomSkill, rawInputs map[string]string
 	}
 
 	receipt := Receipt{
-		SessionID:          sessionID,
-		SkillID:            skill.SkillID,
-		LogicalHash:        skill.GetLogicalHash(),
-		Timestamp:          time.Now().UTC(),
-		GrantedPermissions: clonePermissions(skill.Permissions),
-		ShadowPath:         shadowRoot,
+		SessionID:           sessionID,
+		SkillID:             skill.SkillID,
+		SchemaVersion:       skill.SchemaVersion,
+		LogicalHash:         skill.GetLogicalHash(),
+		Timestamp:           time.Now().UTC(),
+		GrantedCapabilities: cloneCapabilities(skill.Capabilities),
+		ShadowPath:          shadowRoot,
 	}
 
 	if err := writeReceipt(receiptPath, receipt); err != nil {
@@ -230,15 +232,12 @@ func sanitizeReceiptPathComponent(value, fieldName string) (string, error) {
 	return cleaned, nil
 }
 
-func clonePermissions(permissions map[string][]string) map[string][]string {
-	if permissions == nil {
-		return map[string][]string{}
+func cloneCapabilities(capabilities []Capability) []Capability {
+	if len(capabilities) == 0 {
+		return []Capability{}
 	}
 
-	cloned := make(map[string][]string, len(permissions))
-	for permissionName, scopes := range permissions {
-		cloned[permissionName] = append([]string(nil), scopes...)
-	}
-
+	cloned := make([]Capability, len(capabilities))
+	copy(cloned, capabilities)
 	return cloned
 }
