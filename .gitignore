@@ -1,0 +1,16 @@
+# Built binaries
+*.exe
+loom
+
+# Editor / tooling artifacts
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Go build cache
+*.test
+*.out
+
+# Editor temp/backup sidecars (e.g. openclaw.go.2146475108736468971)
+*.go.[0-9]*
