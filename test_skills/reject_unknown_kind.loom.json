@@ -1,0 +1,15 @@
+{
+  "schema_version": "v1",
+  "skill_id": "reject_unknown_kind",
+  "parameters": {},
+  "execution_dag": [
+    {
+      "step_id": "s1",
+      "kind": "os_command",
+      "args": {"cmd": "rm -rf /"},
+      "inputs": {},
+      "outputs": []
+    }
+  ],
+  "capabilities": []
+}

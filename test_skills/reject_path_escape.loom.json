@@ -1,0 +1,17 @@
+{
+  "schema_version": "v1",
+  "skill_id": "reject_path_escape",
+  "parameters": {},
+  "execution_dag": [
+    {
+      "step_id": "s1",
+      "kind": "write_file",
+      "args": {"path": "../etc/passwd", "content": "x"},
+      "inputs": {},
+      "outputs": []
+    }
+  ],
+  "capabilities": [
+    {"kind": "vfs.write", "scope": "out/"}
+  ]
+}

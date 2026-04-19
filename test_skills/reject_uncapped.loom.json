@@ -1,0 +1,15 @@
+{
+  "schema_version": "v1",
+  "skill_id": "reject_uncapped",
+  "parameters": {},
+  "execution_dag": [
+    {
+      "step_id": "s1",
+      "kind": "write_file",
+      "args": {"path": "out/x.txt", "content": "x"},
+      "inputs": {},
+      "outputs": []
+    }
+  ],
+  "capabilities": []
+}

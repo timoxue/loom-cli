@@ -1,0 +1,17 @@
+{
+  "schema_version": "v1",
+  "skill_id": "nested_write",
+  "parameters": {},
+  "execution_dag": [
+    {
+      "step_id": "s1",
+      "kind": "write_file",
+      "args": {"path": "out/nested/deep/report.md", "content": "# Report\n"},
+      "inputs": {},
+      "outputs": []
+    }
+  ],
+  "capabilities": [
+    {"kind": "vfs.write", "scope": "out/"}
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "schema_version": "v2",
+  "skill_id": "reject_wrong_version",
+  "parameters": {},
+  "execution_dag": [],
+  "capabilities": []
+}

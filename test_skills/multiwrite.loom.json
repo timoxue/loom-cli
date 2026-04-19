@@ -1,0 +1,24 @@
+{
+  "schema_version": "v1",
+  "skill_id": "multiwrite",
+  "parameters": {},
+  "execution_dag": [
+    {
+      "step_id": "s1",
+      "kind": "write_file",
+      "args": {"path": "out/first.txt", "content": "first"},
+      "inputs": {},
+      "outputs": []
+    },
+    {
+      "step_id": "s2",
+      "kind": "write_file",
+      "args": {"path": "out/second.txt", "content": "second"},
+      "inputs": {},
+      "outputs": []
+    }
+  ],
+  "capabilities": [
+    {"kind": "vfs.write", "scope": "out/"}
+  ]
+}

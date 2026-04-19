@@ -1,0 +1,9 @@
+{
+  "schema_version": "v1",
+  "skill_id": "reject_highrisk_scope",
+  "parameters": {},
+  "execution_dag": [],
+  "capabilities": [
+    {"kind": "vfs.write", "scope": "/etc"}
+  ]
+}
