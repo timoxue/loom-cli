@@ -39,8 +39,59 @@ func newRootCmd() *cobra.Command {
 
 	rootCmd.AddCommand(newVerifyCmd())
 	rootCmd.AddCommand(newRunCmd())
+	rootCmd.AddCommand(newCommitCmd())
 	rootCmd.AddCommand(newServeCmd())
 	return rootCmd
+}
+
+// newCommitCmd is the promotion boundary. `loom run` only populates the
+// shadow; `loom commit <session>` is the sole path that copies bytes into
+// the real workspace. Without --yes, it prints a dry-run preview and
+// exits without mutating anything. With --yes, it promotes and removes
+// the shadow directory.
+func newCommitCmd() *cobra.Command {
+	var confirm bool
+
+	commitCmd := &cobra.Command{
+		Use:   "commit <session_id>",
+		Short: "Promote a completed shadow workspace into the real workspace",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			sessionID := args[0]
+
+			gate := &engine.CommitGate{}
+			receipt, err := gate.LoadReceipt(sessionID)
+			if err != nil {
+				return err
+			}
+
+			manifest, err := gate.Preview(receipt)
+			if err != nil {
+				return err
+			}
+			engine.PrintManifest(os.Stdout, manifest)
+
+			if !confirm {
+				fmt.Fprintln(os.Stdout, "")
+				fmt.Fprintln(os.Stdout, "(dry-run) no workspace changes made. Re-run with --yes to promote.")
+				return nil
+			}
+
+			if err := gate.Promote(receipt); err != nil {
+				return err
+			}
+
+			printSuccess(
+				fmt.Sprintf("\u2705 Promoted %d change(s) to workspace", len(manifest)),
+				fmt.Sprintf("\U0001F511 Skill ID: %s", receipt.SkillID),
+				fmt.Sprintf("\U0001F4C2 Workspace: %s", receipt.WorkspaceRoot),
+			)
+			return nil
+		},
+	}
+
+	commitCmd.Flags().BoolVar(&confirm, "yes", false, "actually promote; without this the command only previews")
+	return commitCmd
 }
 
 // newRunCmd exposes the v1 end-to-end execution path: parse → compile →
@@ -106,6 +157,7 @@ func newRunCmd() *cobra.Command {
 				fmt.Sprintf("\U0001F6E1\uFE0F  Logical Hash: %s", skill.GetLogicalHash()),
 				fmt.Sprintf("\U0001F4C2 Shadow Path: %s", vfs.ShadowDir),
 			)
+			fmt.Fprintf(os.Stdout, "\nTo promote to workspace, run:\n  loom commit %s --yes\n", sessionID)
 			return nil
 		},
 	}

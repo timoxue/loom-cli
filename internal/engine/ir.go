@@ -47,9 +47,17 @@ const (
 // StepArgs is the typed payload bound to a StepKind. Each implementation owns
 // its canonical byte form so the logical hash stays stable without a central
 // type switch that every new kind has to edit.
+//
+// substituteInputs receives the sanitized caller inputs and returns a new
+// StepArgs value with any ${var} references in substitutable fields expanded.
+// The hash is computed BEFORE substitution; the resulting args are what the
+// executor actually acts on. Each kind decides which of its fields are
+// substitutable — Path-bearing kinds keep Path static so the capability
+// ceiling stays verifiable at admission time.
 type StepArgs interface {
 	stepKind() StepKind
 	writeCanonical(w io.Writer) error
+	substituteInputs(inputs map[string]any) (StepArgs, error)
 }
 
 // ReadFileArgs names a single path inside the shadow tree to read.
@@ -61,6 +69,12 @@ func (ReadFileArgs) stepKind() StepKind { return StepKindReadFile }
 
 func (a ReadFileArgs) writeCanonical(w io.Writer) error {
 	return writeCanonicalFields(w, string(StepKindReadFile), map[string]string{"path": a.Path})
+}
+
+// substituteInputs is a no-op. Path stays static so the capability ceiling
+// is verifiable at admission time.
+func (a ReadFileArgs) substituteInputs(_ map[string]any) (StepArgs, error) {
+	return a, nil
 }
 
 // WriteFileArgs names a single path and the literal content to write into the
@@ -80,6 +94,18 @@ func (a WriteFileArgs) writeCanonical(w io.Writer) error {
 	})
 }
 
+// substituteInputs expands ${var} references in Content using the sanitized
+// caller inputs. Path is intentionally NOT substituted — the capability
+// ceiling must stay verifiable at admission time. An unknown variable is a
+// fail-fast error whose message names the missing variable.
+func (a WriteFileArgs) substituteInputs(inputs map[string]any) (StepArgs, error) {
+	content, err := substituteString(a.Content, inputs)
+	if err != nil {
+		return nil, err
+	}
+	return WriteFileArgs{Path: a.Path, Content: content}, nil
+}
+
 // LegacyStepArgs preserves v0 markdown instruction text so the validator can
 // still run string-based dangerous-command and SSRF scans. The executor
 // refuses to run any Step carrying these args.
@@ -91,6 +117,12 @@ func (LegacyStepArgs) stepKind() StepKind { return StepKindLegacy }
 
 func (a LegacyStepArgs) writeCanonical(w io.Writer) error {
 	return writeCanonicalFields(w, string(StepKindLegacy), map[string]string{"action": a.Action})
+}
+
+// substituteInputs is a no-op for legacy args — v0 skills never reach the
+// executor, so expansion would have no observable effect.
+func (a LegacyStepArgs) substituteInputs(_ map[string]any) (StepArgs, error) {
+	return a, nil
 }
 
 // argsRegistry is the dispatch table for Step.UnmarshalJSON. Any new StepKind

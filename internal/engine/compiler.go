@@ -23,9 +23,11 @@ type Receipt struct {
 	SkillID             string       `json:"skill_id"`
 	SchemaVersion       string       `json:"schema_version"`
 	LogicalHash         string       `json:"logical_hash"`
+	InputDigest         string       `json:"input_digest"`
 	Timestamp           time.Time    `json:"timestamp"`
 	GrantedCapabilities []Capability `json:"granted_capabilities"`
 	ShadowPath          string       `json:"shadow_path"`
+	WorkspaceRoot       string       `json:"workspace_root"`
 }
 
 // CompileAndSetup validates the skill, sanitizes inputs, provisions a shadow workspace, and writes an execution receipt.
@@ -108,14 +110,21 @@ func (c *Compiler) CompileAndSetup(skill *LoomSkill, rawInputs map[string]string
 		return nil, nil, err
 	}
 
+	inputDigest, err := ComputeInputDigest(sanitizedInputs)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	receipt := Receipt{
 		SessionID:           sessionID,
 		SkillID:             skill.SkillID,
 		SchemaVersion:       skill.SchemaVersion,
 		LogicalHash:         skill.GetLogicalHash(),
+		InputDigest:         inputDigest,
 		Timestamp:           time.Now().UTC(),
 		GrantedCapabilities: cloneCapabilities(skill.Capabilities),
 		ShadowPath:          shadowRoot,
+		WorkspaceRoot:       workspaceRoot,
 	}
 
 	if err := writeReceipt(receiptPath, receipt); err != nil {
@@ -126,9 +135,14 @@ func (c *Compiler) CompileAndSetup(skill *LoomSkill, rawInputs map[string]string
 	return shadowVFS, sanitizedInputs, nil
 }
 
+// compilerSessionPaths returns (shadowDir, receiptPath) for the given
+// session. The cache layout is flattened to <session>/receipt.json so
+// `loom commit <session>` can resolve the receipt in O(1) without scanning
+// every historical skillID subdirectory. SkillID still lives inside the
+// receipt JSON, so a future `loom list` command can index by skill
+// without touching the commit hot path.
 func compilerSessionPaths(skillID, sessionID string) (string, string, error) {
-	safeSkillID, err := sanitizeReceiptPathComponent(skillID, "skill_id")
-	if err != nil {
+	if _, err := sanitizeReceiptPathComponent(skillID, "skill_id"); err != nil {
 		return "", "", err
 	}
 	safeSessionID, err := sanitizeReceiptPathComponent(sessionID, "session_id")
@@ -143,9 +157,25 @@ func compilerSessionPaths(skillID, sessionID string) (string, string, error) {
 
 	loomRoot := filepath.Join(homeDir, ".loom")
 	shadowRoot := filepath.Join(loomRoot, "shadow", safeSessionID)
-	receiptPath := filepath.Join(loomRoot, "cache", safeSkillID, safeSessionID+"_receipt.json")
+	receiptPath := filepath.Join(loomRoot, "cache", safeSessionID, "receipt.json")
 
 	return shadowRoot, receiptPath, nil
+}
+
+// ReceiptPathForSession returns the receipt path for a session id rooted
+// under the user's ~/.loom/cache directory. The sessionID argument is
+// validated the same way it is at write time, so `loom commit` cannot be
+// tricked into reading a file outside the cache root.
+func ReceiptPathForSession(sessionID string) (string, error) {
+	safeSessionID, err := sanitizeReceiptPathComponent(sessionID, "session_id")
+	if err != nil {
+		return "", err
+	}
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user home directory: %w", err)
+	}
+	return filepath.Join(homeDir, ".loom", "cache", safeSessionID, "receipt.json"), nil
 }
 
 func writeReceipt(receiptPath string, receipt Receipt) error {

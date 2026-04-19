@@ -76,7 +76,7 @@ func TestCompilerCompileAndSetupCreatesShadowVFSAndReceipt(t *testing.T) {
 		t.Fatalf("sanitized retries = %#v, want 2", sanitizedInputs["retries"])
 	}
 
-	receiptPath := filepath.Join(homeDir, ".loom", "cache", "demo_writefile", "session-001_receipt.json")
+	receiptPath := filepath.Join(homeDir, ".loom", "cache", "session-001", "receipt.json")
 	receiptBytes, err := os.ReadFile(receiptPath)
 	if err != nil {
 		t.Fatalf("ReadFile(receipt) error = %v", err)

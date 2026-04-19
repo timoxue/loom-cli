@@ -1,0 +1,19 @@
+{
+  "schema_version": "v1",
+  "skill_id": "templated_write",
+  "parameters": {
+    "msg": {"type": "string", "default_value": "", "required": true}
+  },
+  "execution_dag": [
+    {
+      "step_id": "s1",
+      "kind": "write_file",
+      "args": {"path": "out/greeting.txt", "content": "hello ${msg}"},
+      "inputs": {"msg": "${msg}"},
+      "outputs": []
+    }
+  ],
+  "capabilities": [
+    {"kind": "vfs.write", "scope": "out/"}
+  ]
+}

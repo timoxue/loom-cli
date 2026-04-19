@@ -28,10 +28,12 @@ const (
 )
 
 type fixture struct {
-	file         string   // path relative to test_skills/
-	expect       stage    // where the pipeline must stop
-	reasonSubstr string   // substring the error message must contain (stage != success)
-	wantWrites   []string // expected manifest write paths (stage == success)
+	file         string            // path relative to test_skills/
+	expect       stage             // where the pipeline must stop
+	reasonSubstr string            // substring the error message must contain (stage != success)
+	wantWrites   []string          // expected manifest write paths (stage == success)
+	inputs       map[string]string // overrides the default-inputs-only flow
+	wantContent  map[string]string // shadow-relative path → expected bytes (stage == success)
 }
 
 var fixtures = []fixture{
@@ -51,6 +53,15 @@ var fixtures = []fixture{
 		expect:     stageSuccess,
 		wantWrites: []string{"out/nested/deep/report.md"},
 	},
+	{
+		// Verifies parameter substitution reaches the shadow file bytes.
+		file:        "templated_write.loom.json",
+		expect:      stageSuccess,
+		wantWrites:  []string{"out/greeting.txt"},
+		inputs:      map[string]string{"msg": "world"},
+		wantContent: map[string]string{"out/greeting.txt": "hello world"},
+	},
+
 	// ---- validator rejects ----
 	{
 		file:         "reject_path_escape.loom.json",
@@ -141,9 +152,13 @@ func runFixture(t *testing.T, fx fixture) {
 	}
 
 	sessionID := "fixture-" + strings.ReplaceAll(fx.file, "/", "_")
+	inputs := fx.inputs
+	if inputs == nil {
+		inputs = defaultInputsFor(skill.Parameters)
+	}
 	vfs, sanitizedInputs, compileErr := compiler.CompileAndSetup(
 		skill,
-		defaultInputsFor(skill.Parameters),
+		inputs,
 		sessionID,
 	)
 	if fx.expect == stageValidate {
@@ -167,6 +182,21 @@ func runFixture(t *testing.T, fx fixture) {
 
 	assertWorkspaceUntouched(t, workspaceRoot)
 	assertManifestWrites(t, vfs, fx.wantWrites)
+	assertShadowContent(t, vfs, fx.wantContent)
+}
+
+func assertShadowContent(t *testing.T, vfs *engine.ShadowVFS, expected map[string]string) {
+	t.Helper()
+	for relPath, wantBytes := range expected {
+		full := filepath.Join(vfs.ShadowDir, filepath.FromSlash(relPath))
+		got, err := os.ReadFile(full)
+		if err != nil {
+			t.Fatalf("read shadow %q: %v", full, err)
+		}
+		if string(got) != wantBytes {
+			t.Fatalf("shadow %q content = %q, want %q", relPath, string(got), wantBytes)
+		}
+	}
 }
 
 func mustFailWith(t *testing.T, err error, reasonSubstr, stageName string) {

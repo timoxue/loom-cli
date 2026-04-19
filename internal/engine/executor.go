@@ -59,7 +59,7 @@ func (e *Executor) Execute(ctx context.Context, skill *LoomSkill, sanitizedInput
 		if err := ctx.Err(); err != nil {
 			return e.safeManifest(), err
 		}
-		if err := e.dispatch(step); err != nil {
+		if err := e.dispatch(step, sanitizedInputs); err != nil {
 			return e.safeManifest(), err
 		}
 	}
@@ -67,8 +67,24 @@ func (e *Executor) Execute(ctx context.Context, skill *LoomSkill, sanitizedInput
 	return e.safeManifest(), nil
 }
 
-func (e *Executor) dispatch(step Step) error {
-	switch args := step.Args.(type) {
+// dispatch substitutes caller inputs into the step's args and routes to
+// the typed handler. Substitution happens AFTER admission (the logical
+// hash was computed against the pre-substitution args) and BEFORE any I/O,
+// so a substitution error aborts the run before the shadow is touched.
+func (e *Executor) dispatch(step Step, inputs map[string]any) error {
+	if step.Args == nil {
+		return &ExecutionError{
+			StepID: step.StepID,
+			Reason: "step has no args",
+		}
+	}
+
+	substituted, err := step.Args.substituteInputs(inputs)
+	if err != nil {
+		return &ExecutionError{StepID: step.StepID, Reason: err.Error()}
+	}
+
+	switch args := substituted.(type) {
 	case ReadFileArgs:
 		return e.handleReadFile(step, args)
 	case WriteFileArgs:
