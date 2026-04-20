@@ -5,7 +5,7 @@ services:
       - "${LOOM_PORT:-8080}:8080"
     volumes:
       - ./skills:/loom/skills:ro
-      - loom-cache:/root/.loom
+      - ./audit-log:/home/loom/.loom
     environment:
       - LOOM_DRAFT_POLICY=${LOOM_DRAFT_POLICY:-warn}
     restart: unless-stopped
@@ -15,5 +15,4 @@ services:
       timeout: 5s
       retries: 3
 
-volumes:
-  loom-cache:
+volumes: {}

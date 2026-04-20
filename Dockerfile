@@ -6,13 +6,17 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o loom ./cmd
 
 FROM alpine:3.21
-RUN apk add --no-cache ca-certificates tzdata
+RUN apk add --no-cache ca-certificates tzdata && \
+    addgroup -S loom && adduser -S -G loom loom
 WORKDIR /loom
 COPY --from=builder /build/loom ./loom
+RUN chown -R loom:loom /loom
 
-# /loom/skills  — mount your .loom.json skill files here
-# /root/.loom   — receipt cache (persist across restarts)
-VOLUME ["/loom/skills", "/root/.loom"]
+USER loom
+
+# /loom/skills      — mount your .loom.json skill files here (read-only)
+# /home/loom/.loom  — receipt cache (persist across restarts)
+VOLUME ["/loom/skills", "/home/loom/.loom"]
 
 EXPOSE 8080
 ENTRYPOINT ["./loom"]
