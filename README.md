@@ -117,4 +117,4 @@ If you're thinking about touching the IR or the executor, read [CLAUDE.md](CLAUD
 
 ## License
 
-TBD. This is early-stage code; pick an appropriate OSS license before first external use.
+Apache 2.0. See [LICENSE](LICENSE).
