@@ -1,5 +1,7 @@
 # loom
 
+[中文](README.zh-CN.md) | English
+
 > The secure Tools-and-Guardrails runtime for production AI agent harnesses.
 
 Loom sits at one specific layer of the agent stack: it turns untrusted execution intent into capability-bounded, sandboxed, auditable filesystem changes, and refuses to promote them to the real workspace without explicit human sign-off. It is **not** an agent framework, **not** a memory system, **not** a prompt-construction layer — it is the execution substrate those systems can plug into.
