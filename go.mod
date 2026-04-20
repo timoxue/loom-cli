@@ -1,6 +1,6 @@
 module github.com/timoxue/loom-cli
 
-go 1.26.2
+go 1.24
 
 require (
 	dario.cat/mergo v1.0.0 // indirect

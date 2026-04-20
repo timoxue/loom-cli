@@ -1,0 +1,19 @@
+services:
+  loom:
+    build: .
+    ports:
+      - "${LOOM_PORT:-8080}:8080"
+    volumes:
+      - ./skills:/loom/skills:ro
+      - loom-cache:/root/.loom
+    environment:
+      - LOOM_DRAFT_POLICY=${LOOM_DRAFT_POLICY:-warn}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "./loom", "--help"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  loom-cache:
