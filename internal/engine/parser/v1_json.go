@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/yourname/loom-cli/internal/engine"
+	"github.com/timoxue/loom-cli/internal/engine"
 )
 
 // V1JSONParser reads a v1 skill document in JSON form. Step.UnmarshalJSON

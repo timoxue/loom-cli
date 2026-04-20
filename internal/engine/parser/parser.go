@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/yourname/loom-cli/internal/engine"
+	"github.com/timoxue/loom-cli/internal/engine"
 )
 
 // SkillParser translates an external skill document into the internal Loom IR.

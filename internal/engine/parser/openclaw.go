@@ -5,7 +5,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/yourname/loom-cli/internal/engine"
+	"github.com/timoxue/loom-cli/internal/engine"
 )
 
 var (
@@ -68,10 +68,30 @@ func (p *OpenClawParser) Parse(rawContent []byte) (*engine.LoomSkill, error) {
 	return &engine.LoomSkill{
 		SchemaVersion: "",
 		SkillID:       skillID,
+		Description:   extractFrontmatterField(frontmatter, "description"),
 		Parameters:    parameters,
 		ExecutionDAG:  executionDAG,
 		Capabilities:  capabilities,
 	}, nil
+}
+
+// extractFrontmatterField returns the value of a YAML-ish frontmatter line
+// like `key: value`, trimming quotes and whitespace. Empty string if the
+// key is absent — callers treat missing metadata as "no description" and
+// fall back upstream. This is a deliberately tiny parser; the v0 markdown
+// format is not a schema we're committing to extending.
+func extractFrontmatterField(lines []string, key string) string {
+	prefix := strings.ToLower(key) + ":"
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(strings.ToLower(trimmed), prefix) {
+			continue
+		}
+		value := strings.TrimSpace(trimmed[len(prefix):])
+		value = strings.Trim(value, `"`)
+		return value
+	}
+	return ""
 }
 
 func capabilitiesFromPermissions(permissions map[string][]string) ([]engine.Capability, error) {

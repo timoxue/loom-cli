@@ -128,8 +128,8 @@ const (
 // Path is workspace-relative and forward-slash normalized for display and
 // hash stability.
 type Change struct {
-	Op   ChangeOp
-	Path string
+	Op   ChangeOp `json:"op"`
+	Path string   `json:"path"`
 }
 
 // Manifest walks the shadow tree and returns the full set of pending

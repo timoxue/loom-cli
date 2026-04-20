@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/yourname/loom-cli/internal/security"
+	"github.com/timoxue/loom-cli/internal/security"
 )
 
 func TestValidateSkillAcceptsValidDataflowV1(t *testing.T) {

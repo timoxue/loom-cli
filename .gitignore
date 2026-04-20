@@ -14,3 +14,6 @@ loom
 
 # Editor temp/backup sidecars (e.g. openclaw.go.2146475108736468971)
 *.go.[0-9]*
+
+# Third-party skill corpora kept locally for migration testing; not part of loom itself
+OpenClaw-Medical-Skills/

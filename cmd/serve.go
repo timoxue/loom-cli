@@ -10,15 +10,16 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 
-	"github.com/yourname/loom-cli/internal/engine"
-	"github.com/yourname/loom-cli/internal/engine/parser"
-	"github.com/yourname/loom-cli/internal/security"
+	"github.com/timoxue/loom-cli/internal/engine"
+	"github.com/timoxue/loom-cli/internal/engine/parser"
+	"github.com/timoxue/loom-cli/internal/security"
 )
 
 const deterministicGatewayBanner = `
@@ -202,6 +203,8 @@ func (s *mcpServer) handleMCPRequest(responseWriter http.ResponseWriter, request
 			ID:      mcpRequest.ID,
 			Result:  map[string]any{},
 		})
+	case "tools/list":
+		s.handleToolsList(responseWriter, mcpRequest)
 	case "tools/call":
 		s.handleToolCall(responseWriter, mcpRequest)
 	default:
@@ -216,91 +219,186 @@ func (s *mcpServer) handleMCPRequest(responseWriter http.ResponseWriter, request
 	}
 }
 
+// toolDefinition is the MCP tools/list entry. Shape follows the MCP spec:
+// name + description + input_schema (JSON Schema draft-07 object shape).
+type toolDefinition struct {
+	Name        string      `json:"name"`
+	Description string      `json:"description"`
+	InputSchema inputSchema `json:"inputSchema"`
+}
+
+type inputSchema struct {
+	Type       string                        `json:"type"`
+	Properties map[string]propertyDefinition `json:"properties"`
+	Required   []string                      `json:"required,omitempty"`
+}
+
+type propertyDefinition struct {
+	Type    string `json:"type"`
+	Default string `json:"default,omitempty"`
+}
+
+// toolResultContent is one block of the MCP tool-result content array.
+type toolResultContent struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+// toolResult is the MCP shape returned by tools/call. _loom carries
+// loom-specific audit metadata that programmatic clients can use; Claude
+// and other MCP clients read only `content` and `isError`.
+type toolResult struct {
+	Content []toolResultContent `json:"content"`
+	IsError bool                `json:"isError"`
+	Loom    *loomResultMetadata `json:"_loom,omitempty"`
+}
+
+type loomResultMetadata struct {
+	SessionID   string          `json:"session_id,omitempty"`
+	ShadowPath  string          `json:"shadow_path,omitempty"`
+	LogicalHash string          `json:"logical_hash,omitempty"`
+	InputDigest string          `json:"input_digest,omitempty"`
+	Manifest    []engine.Change `json:"manifest,omitempty"`
+}
+
+// handleToolsList walks the skills directory, parses each file, and
+// returns the successful parses as MCP tools. Parse failures are
+// "tolerant outside, noisy inside": the MCP response silently omits
+// the broken file, but a line is written to stderr with the filename
+// and the concrete reason so developers don't debug in the dark.
+func (s *mcpServer) handleToolsList(responseWriter http.ResponseWriter, mcpRequest MCPRequest) {
+	tools := make([]toolDefinition, 0, 8)
+
+	entries, err := os.ReadDir(s.skillsDir)
+	if err != nil {
+		writeMCPResponse(responseWriter, http.StatusOK, MCPResponse{
+			JSONRPC: "2.0",
+			ID:      mcpRequest.ID,
+			Error: &MCPErrorBody{
+				Code:    -32000,
+				Message: fmt.Sprintf("read skills dir: %v", err),
+			},
+		})
+		return
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		lowerName := strings.ToLower(entry.Name())
+		if !strings.HasSuffix(lowerName, ".loom.json") && !strings.HasSuffix(lowerName, ".md") {
+			continue
+		}
+
+		fullPath := filepath.Join(s.skillsDir, entry.Name())
+		raw, err := os.ReadFile(fullPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "loom serve: skipping %q: %v\n", entry.Name(), err)
+			continue
+		}
+		skill, err := parser.ParseFile(entry.Name(), raw)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "loom serve: skipping %q: %v\n", entry.Name(), err)
+			continue
+		}
+		tools = append(tools, skillToToolDefinition(skill))
+	}
+
+	sort.Slice(tools, func(i, j int) bool { return tools[i].Name < tools[j].Name })
+
+	writeMCPResponse(responseWriter, http.StatusOK, MCPResponse{
+		JSONRPC: "2.0",
+		ID:      mcpRequest.ID,
+		Result:  map[string]any{"tools": tools},
+	})
+}
+
+// skillToToolDefinition converts a parsed LoomSkill into the MCP tool
+// definition shape. Description falls back to "Loom skill <name>" when
+// empty so the agent always sees a non-empty hint for tool selection.
+func skillToToolDefinition(skill *engine.LoomSkill) toolDefinition {
+	description := skill.Description
+	if strings.TrimSpace(description) == "" {
+		description = fmt.Sprintf("Loom skill %s", skill.SkillID)
+	}
+
+	properties := make(map[string]propertyDefinition, len(skill.Parameters))
+	required := make([]string, 0, len(skill.Parameters))
+
+	names := make([]string, 0, len(skill.Parameters))
+	for name := range skill.Parameters {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		param := skill.Parameters[name]
+		properties[name] = propertyDefinition{
+			Type:    parameterTypeToJSONSchemaType(param.Type),
+			Default: param.DefaultValue,
+		}
+		if param.Required {
+			required = append(required, name)
+		}
+	}
+
+	return toolDefinition{
+		Name:        skill.SkillID,
+		Description: description,
+		InputSchema: inputSchema{
+			Type:       "object",
+			Properties: properties,
+			Required:   required,
+		},
+	}
+}
+
+func parameterTypeToJSONSchemaType(pt engine.ParameterType) string {
+	switch pt {
+	case engine.ParameterTypeString:
+		return "string"
+	case engine.ParameterTypeInt:
+		return "integer"
+	case engine.ParameterTypeBool:
+		return "boolean"
+	case engine.ParameterTypeFloat:
+		return "number"
+	default:
+		return "string"
+	}
+}
+
+// handleToolCall runs a skill end-to-end into the shadow workspace and
+// returns an MCP tool-result describing what happened. Recoverable
+// failures (skill not found, validator rejection, executor error) come
+// back as `isError: true` tool results, not JSON-RPC errors — JSON-RPC
+// errors stay reserved for protocol-level issues (bad JSON, wrong
+// method). This gives the agent a single failure-handling branch.
+//
+// Commit stays out-of-band: this handler never calls Promote. The
+// returned _loom.session_id is what the operator runs `loom commit`
+// against, on the host.
 func (s *mcpServer) handleToolCall(responseWriter http.ResponseWriter, mcpRequest MCPRequest) {
 	skillName := strings.TrimSpace(mcpRequest.Params.Name)
 	if skillName == "" {
-		writeMCPResponse(responseWriter, http.StatusOK, MCPResponse{
-			JSONRPC: "2.0",
-			ID:      mcpRequest.ID,
-			Error: &MCPErrorBody{
-				Code:    -32000,
-				Message: "tool name must not be empty",
-			},
-		})
+		writeToolResultError(responseWriter, mcpRequest.ID, "tool name must not be empty")
 		return
 	}
 	if err := validateSkillLookupName(skillName); err != nil {
-		writeMCPResponse(responseWriter, http.StatusOK, MCPResponse{
-			JSONRPC: "2.0",
-			ID:      mcpRequest.ID,
-			Error: &MCPErrorBody{
-				Code:    -32000,
-				Message: err.Error(),
-			},
-		})
+		writeToolResultError(responseWriter, mcpRequest.ID, err.Error())
 		return
 	}
 
-	skillFilename := skillName + ".md"
-	skillPath := filepath.Join(s.skillsDir, filepath.FromSlash(skillFilename))
-
-	if within, err := isWithinBasePath(s.skillsDir, skillPath); err != nil {
-		writeMCPResponse(responseWriter, http.StatusOK, MCPResponse{
-			JSONRPC: "2.0",
-			ID:      mcpRequest.ID,
-			Error: &MCPErrorBody{
-				Code:    -32000,
-				Message: err.Error(),
-			},
-		})
-		return
-	} else if !within {
-		writeMCPResponse(responseWriter, http.StatusOK, MCPResponse{
-			JSONRPC: "2.0",
-			ID:      mcpRequest.ID,
-			Error: &MCPErrorBody{
-				Code:    -32000,
-				Message: "tool path escapes skills directory",
-			},
-		})
-		return
-	}
-
-	rawContent, err := os.ReadFile(skillPath)
+	skillPath, rawContent, err := s.locateSkillFile(skillName)
 	if err != nil {
-		if os.IsNotExist(err) {
-			writeMCPResponse(responseWriter, http.StatusOK, MCPResponse{
-				JSONRPC: "2.0",
-				ID:      mcpRequest.ID,
-				Error: &MCPErrorBody{
-					Code:    -32000,
-					Message: fmt.Sprintf("skill %q not found", skillName),
-				},
-			})
-			return
-		}
-
-		writeMCPResponse(responseWriter, http.StatusOK, MCPResponse{
-			JSONRPC: "2.0",
-			ID:      mcpRequest.ID,
-			Error: &MCPErrorBody{
-				Code:    -32000,
-				Message: fmt.Sprintf("read skill file: %v", err),
-			},
-		})
+		writeToolResultError(responseWriter, mcpRequest.ID, err.Error())
 		return
 	}
 
 	skill, err := parser.ParseFile(skillPath, rawContent)
 	if err != nil {
-		writeMCPResponse(responseWriter, http.StatusOK, MCPResponse{
-			JSONRPC: "2.0",
-			ID:      mcpRequest.ID,
-			Error: &MCPErrorBody{
-				Code:    -32000,
-				Message: err.Error(),
-			},
-		})
+		writeToolResultError(responseWriter, mcpRequest.ID, fmt.Sprintf("parse %s: %v", filepath.Base(skillPath), err))
 		return
 	}
 
@@ -311,38 +409,108 @@ func (s *mcpServer) handleToolCall(responseWriter http.ResponseWriter, mcpReques
 
 	sessionID, err := newSessionID()
 	if err != nil {
-		writeMCPResponse(responseWriter, http.StatusOK, MCPResponse{
-			JSONRPC: "2.0",
-			ID:      mcpRequest.ID,
-			Error: &MCPErrorBody{
-				Code:    -32000,
-				Message: err.Error(),
-			},
-		})
+		writeToolResultError(responseWriter, mcpRequest.ID, err.Error())
 		return
 	}
 
-	shadowVFS, _, err := compiler.CompileAndSetup(skill, mcpRequest.Params.Arguments, sessionID)
+	shadowVFS, sanitizedInputs, err := compiler.CompileAndSetup(skill, mcpRequest.Params.Arguments, sessionID)
 	if err != nil {
-		writeMCPResponse(responseWriter, http.StatusOK, MCPResponse{
-			JSONRPC: "2.0",
-			ID:      mcpRequest.ID,
-			Error: &MCPErrorBody{
-				Code:    -32000,
-				Message: err.Error(),
-			},
+		writeToolResultError(responseWriter, mcpRequest.ID, fmt.Sprintf("admission failed: %v", err))
+		return
+	}
+
+	executor := &engine.Executor{VFS: shadowVFS}
+	manifest, execErr := executor.Execute(context.Background(), skill, sanitizedInputs)
+
+	meta := &loomResultMetadata{
+		SessionID:   sessionID,
+		ShadowPath:  shadowVFS.ShadowDir,
+		LogicalHash: skill.GetLogicalHash(),
+		Manifest:    manifest,
+	}
+
+	if execErr != nil {
+		// Execution failed after admission — session still exists for post-mortem,
+		// but the agent should see isError. Partial manifest is carried so the
+		// agent can tell how far the run got.
+		writeToolResult(responseWriter, mcpRequest.ID, toolResult{
+			Content: []toolResultContent{{
+				Type: "text",
+				Text: fmt.Sprintf("execution failed: %v", execErr),
+			}},
+			IsError: true,
+			Loom:    meta,
 		})
 		return
 	}
 
+	summary := formatExecutionSummary(skill, sessionID, manifest)
+	writeToolResult(responseWriter, mcpRequest.ID, toolResult{
+		Content: []toolResultContent{{Type: "text", Text: summary}},
+		IsError: false,
+		Loom:    meta,
+	})
+}
+
+// locateSkillFile resolves a tool name to a concrete skill file on disk.
+// v1 JSON is preferred (the only shape the executor can actually run);
+// .md is the v0 fallback so `verify` behavior is preserved for legacy
+// skills, even though they'll ultimately be rejected by the executor.
+func (s *mcpServer) locateSkillFile(skillName string) (string, []byte, error) {
+	for _, suffix := range []string{".loom.json", ".md"} {
+		candidate := filepath.Join(s.skillsDir, filepath.FromSlash(skillName+suffix))
+
+		within, err := isWithinBasePath(s.skillsDir, candidate)
+		if err != nil {
+			return "", nil, err
+		}
+		if !within {
+			return "", nil, fmt.Errorf("tool path escapes skills directory")
+		}
+
+		raw, err := os.ReadFile(candidate)
+		if err == nil {
+			return candidate, raw, nil
+		}
+		if !os.IsNotExist(err) {
+			return "", nil, fmt.Errorf("read skill file: %w", err)
+		}
+	}
+	return "", nil, fmt.Errorf("skill %q not found", skillName)
+}
+
+// formatExecutionSummary renders the human-readable text block that
+// Claude sees in the tool_result content. It intentionally names the
+// session-id so the agent can suggest the right commit command to the
+// user in its next turn.
+func formatExecutionSummary(skill *engine.LoomSkill, sessionID string, manifest []engine.Change) string {
+	var builder strings.Builder
+	builder.WriteString(fmt.Sprintf("Executed skill %q in a sandboxed shadow workspace.\n", skill.SkillID))
+	builder.WriteString(fmt.Sprintf("Session: %s\n", sessionID))
+	if len(manifest) == 0 {
+		builder.WriteString("No filesystem changes produced.\n")
+	} else {
+		builder.WriteString("Pending changes:\n")
+		for _, change := range manifest {
+			builder.WriteString(fmt.Sprintf("  %s  %s\n", change.Op, change.Path))
+		}
+	}
+	builder.WriteString(fmt.Sprintf("\nReal workspace is unchanged. To promote, the user must run:\n  loom commit %s --yes", sessionID))
+	return builder.String()
+}
+
+func writeToolResult(responseWriter http.ResponseWriter, id any, result toolResult) {
 	writeMCPResponse(responseWriter, http.StatusOK, MCPResponse{
 		JSONRPC: "2.0",
-		ID:      mcpRequest.ID,
-		Result: map[string]any{
-			"status":           "intercepted_and_verified",
-			"shadow_workspace": shadowVFS.ShadowDir,
-			"logical_hash":     skill.GetLogicalHash(),
-		},
+		ID:      id,
+		Result:  result,
+	})
+}
+
+func writeToolResultError(responseWriter http.ResponseWriter, id any, message string) {
+	writeToolResult(responseWriter, id, toolResult{
+		Content: []toolResultContent{{Type: "text", Text: message}},
+		IsError: true,
 	})
 }
 

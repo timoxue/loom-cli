@@ -9,6 +9,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"time"
 )
 
 // CurrentSchemaVersion is the only schema version the executor accepts today.
@@ -233,12 +234,108 @@ func derefArgs(args StepArgs) StepArgs {
 }
 
 // LoomSkill is the strongly typed semantic contract of a governed skill.
+//
+// Description is a human-readable summary used by tool-discovery surfaces
+// like MCP `tools/list`. It is PURE METADATA — deliberately excluded from
+// the logical hash so two skills identical in behavior but differing in
+// description produce the same fingerprint. Changing a description is not
+// a behavior change and must not invalidate audit trails.
+//
+// Provenance records where a skill came from (handwritten vs migrated
+// from a legacy format) and whether a human has reviewed it. Like
+// Description, it is metadata only and excluded from the logical hash.
+// The executor uses it to enforce the "migrated skills must be reviewed
+// before execution" contract.
 type LoomSkill struct {
 	SchemaVersion string               `json:"schema_version"`
 	SkillID       string               `json:"skill_id"`
+	Description   string               `json:"description,omitempty"`
 	Parameters    map[string]Parameter `json:"parameters"`
 	ExecutionDAG  []Step               `json:"execution_dag"`
 	Capabilities  []Capability         `json:"capabilities"`
+	Provenance    *Provenance          `json:"_provenance,omitempty"`
+}
+
+// ProvenanceMode names the kind of process that produced a migrated skill.
+// It is a closed enum so the executor can enforce stricter policy on
+// less-trusted modes (e.g. stubs can never run even if marked reviewed).
+type ProvenanceMode string
+
+const (
+	// ProvenanceModeMechanical means the skill was produced by a regex
+	// classifier with no LLM involvement. Fast and deterministic, but
+	// the "mechanical" label is an efficiency claim, NOT a trust claim —
+	// human review is still required before execution.
+	ProvenanceModeMechanical ProvenanceMode = "mechanical"
+
+	// ProvenanceModeLLMAssisted means an LLM produced the v1 body from
+	// a free-form natural-language source. Output should be treated as
+	// a draft until explicitly reviewed.
+	ProvenanceModeLLMAssisted ProvenanceMode = "llm-assisted"
+
+	// ProvenanceModeStub means the migrator could not produce a runnable
+	// v1 body (missing capability, LLM unavailable, etc.) and emitted a
+	// placeholder. Stubs are never executable regardless of review state.
+	ProvenanceModeStub ProvenanceMode = "stub"
+)
+
+// Provenance documents how a skill came to exist and whether a human has
+// signed off on it. Populated exclusively by the migrator; hand-authored
+// skills leave LoomSkill.Provenance nil.
+//
+// Reviewed + ReviewerSignature form an integrity channel: `loom
+// accept-migration` is the intended way to flip Reviewed to true, and it
+// computes ReviewerSignature from the canonical body. A later executor
+// run recomputes the signature and rejects mismatches, which catches
+// naive hand-edits that set "reviewed": true without going through the
+// accept command. This is not cryptographic — anyone can reproduce the
+// signature algorithm from loom's source — but it documents that review
+// went through the intended path, which is what audit trails need.
+type Provenance struct {
+	Origin            string         `json:"origin"`
+	Mode              ProvenanceMode `json:"mode"`
+	Model             string         `json:"model,omitempty"`
+	PromptTemplate    string         `json:"prompt_template,omitempty"`
+	SourcePath        string         `json:"source_path"`
+	SourceHash        string         `json:"source_hash"`
+	StubReason        string         `json:"stub_reason,omitempty"`
+	MigratedAt        time.Time      `json:"migrated_at"`
+	Reviewed          bool           `json:"reviewed"`
+	ReviewedAt        *time.Time     `json:"reviewed_at,omitempty"`
+	ReviewerSignature string         `json:"reviewer_signature,omitempty"`
+}
+
+// CanonicalBodyHash returns a sha256 hex over the skill's reviewable
+// substance — every field the reviewer's signature attests to. It
+// deliberately EXCLUDES ReviewerSignature itself (that would create a
+// self-reference) and Reviewed/ReviewedAt (which flip legitimately when
+// accept-migration is invoked). Anything else: SchemaVersion, SkillID,
+// Description, Parameters, ExecutionDAG, Capabilities, and every
+// provenance field except the three exclusions.
+//
+// A non-tamper-evident signature scheme: we use JSON with the excluded
+// fields zeroed rather than a dedicated canonical encoder because the
+// content is fully typed and Go's encoding/json sorts map keys. If we
+// later need stronger guarantees, switch to the same length-prefixed
+// scheme used by GetLogicalHash.
+func CanonicalBodyHash(skill *LoomSkill) (string, error) {
+	if skill == nil {
+		return "", fmt.Errorf("skill is nil")
+	}
+	clone := *skill
+	if clone.Provenance != nil {
+		provClone := *clone.Provenance
+		provClone.Reviewed = false
+		provClone.ReviewedAt = nil
+		provClone.ReviewerSignature = ""
+		clone.Provenance = &provClone
+	}
+	raw, err := json.Marshal(&clone)
+	if err != nil {
+		return "", fmt.Errorf("marshal skill for signature: %w", err)
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // GetLogicalHash returns a stable SHA-256 fingerprint of the behavior-defining

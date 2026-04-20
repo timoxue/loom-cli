@@ -1,4 +1,4 @@
-module github.com/yourname/loom-cli
+module github.com/timoxue/loom-cli
 
 go 1.26.2
 

@@ -11,9 +11,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/yourname/loom-cli/internal/engine"
-	"github.com/yourname/loom-cli/internal/engine/parser"
-	"github.com/yourname/loom-cli/internal/security"
+	"github.com/timoxue/loom-cli/internal/engine"
+	"github.com/timoxue/loom-cli/internal/engine/parser"
+	"github.com/timoxue/loom-cli/internal/security"
 )
 
 const (
@@ -41,6 +41,8 @@ func newRootCmd() *cobra.Command {
 	rootCmd.AddCommand(newRunCmd())
 	rootCmd.AddCommand(newCommitCmd())
 	rootCmd.AddCommand(newServeCmd())
+	rootCmd.AddCommand(newMigrateOpenClawCmd())
+	rootCmd.AddCommand(newAcceptMigrationCmd())
 	return rootCmd
 }
 
@@ -97,8 +99,14 @@ func newCommitCmd() *cobra.Command {
 // newRunCmd exposes the v1 end-to-end execution path: parse → compile →
 // executor → commit-gate manifest. The commit gate today prints the shadow
 // manifest and stops; it never promotes bytes into the real workspace.
+//
+// `--accept-draft` is a shorthand for `--draft-policy=allow` scoped to
+// this invocation only. Use `LOOM_DRAFT_POLICY` (refuse | warn | allow)
+// to change the default across every command in the shell.
 func newRunCmd() *cobra.Command {
 	var inputFlags []string
+	var draftPolicyFlag string
+	var acceptDraft bool
 
 	runCmd := &cobra.Command{
 		Use:   "run <skill_file_path>",
@@ -119,6 +127,11 @@ func newRunCmd() *cobra.Command {
 
 			if skill.SchemaVersion != engine.CurrentSchemaVersion {
 				return fmt.Errorf("schema %q is not executable; run requires schema_version=%q", skill.SchemaVersion, engine.CurrentSchemaVersion)
+			}
+
+			draftPolicy, err := resolveDraftPolicy(draftPolicyFlag, acceptDraft)
+			if err != nil {
+				return err
 			}
 
 			policy := security.DefaultPolicy()
@@ -142,7 +155,10 @@ func newRunCmd() *cobra.Command {
 				return err
 			}
 
-			executor := &engine.Executor{VFS: vfs}
+			executor := &engine.Executor{
+				VFS:         vfs,
+				DraftPolicy: draftPolicy,
+			}
 			manifest, execErr := executor.Execute(context.Background(), skill, sanitizedInputs)
 
 			engine.PrintManifest(os.Stdout, manifest)
@@ -163,7 +179,31 @@ func newRunCmd() *cobra.Command {
 	}
 
 	runCmd.Flags().StringSliceVar(&inputFlags, "input", nil, "repeatable key=value input pair")
+	runCmd.Flags().StringVar(&draftPolicyFlag, "draft-policy", "", "how to treat unreviewed migration drafts: refuse|warn|allow (default: refuse, can also be set via LOOM_DRAFT_POLICY)")
+	runCmd.Flags().BoolVar(&acceptDraft, "accept-draft", false, "shorthand for --draft-policy=allow, scoped to this invocation")
 	return runCmd
+}
+
+// resolveDraftPolicy reconciles (in precedence order) the --accept-draft
+// shorthand, the explicit --draft-policy flag, the LOOM_DRAFT_POLICY
+// environment variable, and the built-in "refuse" default.
+func resolveDraftPolicy(flagValue string, acceptDraft bool) (engine.DraftPolicy, error) {
+	if acceptDraft {
+		return engine.DraftPolicyAllow, nil
+	}
+	if flagValue == "" {
+		flagValue = os.Getenv("LOOM_DRAFT_POLICY")
+	}
+	switch strings.ToLower(strings.TrimSpace(flagValue)) {
+	case "", "refuse":
+		return engine.DraftPolicyRefuse, nil
+	case "warn":
+		return engine.DraftPolicyWarn, nil
+	case "allow":
+		return engine.DraftPolicyAllow, nil
+	default:
+		return "", fmt.Errorf("invalid draft policy %q (expected refuse|warn|allow)", flagValue)
+	}
 }
 
 func parseInputFlags(flags []string) (map[string]string, error) {

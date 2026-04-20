@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yourname/loom-cli/internal/security"
+	"github.com/timoxue/loom-cli/internal/security"
 )
 
 // Compiler orchestrates validation, input sanitization, and isolated execution setup.

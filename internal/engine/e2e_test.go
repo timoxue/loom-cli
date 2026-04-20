@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yourname/loom-cli/internal/security"
+	"github.com/timoxue/loom-cli/internal/security"
 )
 
 // TestE2ESpikeWriteFileHoldsSandbox validates the four acceptance checks
@@ -130,6 +130,169 @@ func TestE2ESpikePathEscapeRejectedBeforeExecution(t *testing.T) {
 	parentEscape := filepath.Join(filepath.Dir(homeDir), "etc", "passwd")
 	if _, statErr := os.Stat(parentEscape); !os.IsNotExist(statErr) {
 		t.Fatalf("escape path %q exists, stat = %v", parentEscape, statErr)
+	}
+}
+
+// draftSkill builds a v1 write-file skill with the given provenance.
+// Used as a shared fixture for draft-policy executor tests.
+func draftSkill(prov *Provenance) *LoomSkill {
+	return &LoomSkill{
+		SchemaVersion: CurrentSchemaVersion,
+		SkillID:       "draft_probe",
+		ExecutionDAG: []Step{
+			{
+				StepID: "s1",
+				Kind:   StepKindWriteFile,
+				Args:   WriteFileArgs{Path: "out/hi.txt", Content: "hi"},
+			},
+		},
+		Capabilities: []Capability{{Kind: CapKindVFSWrite, Scope: "out/"}},
+		Provenance:   prov,
+	}
+}
+
+func compileDraftSkill(t *testing.T, skill *LoomSkill, sessionID string) (*ShadowVFS, map[string]any) {
+	t.Helper()
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
+	compiler := &Compiler{
+		Policy:        security.DefaultPolicy(),
+		WorkspaceRoot: t.TempDir(),
+	}
+	vfs, inputs, err := compiler.CompileAndSetup(skill, nil, sessionID)
+	if err != nil {
+		t.Fatalf("CompileAndSetup() error = %v", err)
+	}
+	return vfs, inputs
+}
+
+func TestExecutorRefusesUnreviewedDraftByDefault(t *testing.T) {
+	skill := draftSkill(&Provenance{
+		Origin:     "openclaw-migrate",
+		Mode:       ProvenanceModeLLMAssisted,
+		SourcePath: "skills/demo.md",
+		SourceHash: "abc",
+		Reviewed:   false,
+	})
+	vfs, sanitized := compileDraftSkill(t, skill, "draft-refuse")
+
+	executor := &Executor{VFS: vfs} // zero DraftPolicy == refuse
+	_, err := executor.Execute(context.Background(), skill, sanitized)
+	if err == nil {
+		t.Fatal("Execute() error = nil, want refusal of unreviewed draft")
+	}
+	if !strings.Contains(err.Error(), "reviewed") {
+		t.Fatalf("error %q should mention 'reviewed'", err.Error())
+	}
+}
+
+func TestExecutorAllowsUnreviewedDraftUnderAllowPolicy(t *testing.T) {
+	skill := draftSkill(&Provenance{
+		Origin:     "openclaw-migrate",
+		Mode:       ProvenanceModeLLMAssisted,
+		SourcePath: "skills/demo.md",
+		SourceHash: "abc",
+		Reviewed:   false,
+	})
+	vfs, sanitized := compileDraftSkill(t, skill, "draft-allow")
+
+	executor := &Executor{VFS: vfs, DraftPolicy: DraftPolicyAllow}
+	if _, err := executor.Execute(context.Background(), skill, sanitized); err != nil {
+		t.Fatalf("Execute() error = %v, want success under DraftPolicyAllow", err)
+	}
+}
+
+func TestExecutorWarnPolicyEmitsWarningButExecutes(t *testing.T) {
+	skill := draftSkill(&Provenance{
+		Origin:     "openclaw-migrate",
+		Mode:       ProvenanceModeMechanical,
+		SourcePath: "skills/demo.md",
+		SourceHash: "abc",
+		Reviewed:   false,
+	})
+	vfs, sanitized := compileDraftSkill(t, skill, "draft-warn")
+
+	var warningBuffer bytes.Buffer
+	executor := &Executor{
+		VFS:          vfs,
+		DraftPolicy:  DraftPolicyWarn,
+		DraftWarning: &warningBuffer,
+	}
+	if _, err := executor.Execute(context.Background(), skill, sanitized); err != nil {
+		t.Fatalf("Execute() error = %v, want success under DraftPolicyWarn", err)
+	}
+	if !strings.Contains(warningBuffer.String(), "draft_probe") {
+		t.Fatalf("warning output %q should name the skill", warningBuffer.String())
+	}
+}
+
+func TestExecutorRefusesStubEvenUnderAllow(t *testing.T) {
+	// Stubs are never executable, regardless of policy. This is the
+	// invariant that makes Tier 3 migration output safe to ship.
+	skill := draftSkill(&Provenance{
+		Origin:     "openclaw-migrate",
+		Mode:       ProvenanceModeStub,
+		SourcePath: "skills/shell_only.md",
+		SourceHash: "abc",
+		StubReason: "capability os_command not supported",
+	})
+	vfs, sanitized := compileDraftSkill(t, skill, "draft-stub")
+
+	executor := &Executor{VFS: vfs, DraftPolicy: DraftPolicyAllow}
+	_, err := executor.Execute(context.Background(), skill, sanitized)
+	if err == nil {
+		t.Fatal("Execute() error = nil, want stub to be refused even under DraftPolicyAllow")
+	}
+	if !strings.Contains(err.Error(), "stub") {
+		t.Fatalf("error %q should mention 'stub'", err.Error())
+	}
+}
+
+func TestExecutorAllowsReviewedSkillWithValidSignature(t *testing.T) {
+	skill := draftSkill(&Provenance{
+		Origin:     "openclaw-migrate",
+		Mode:       ProvenanceModeMechanical,
+		SourcePath: "skills/demo.md",
+		SourceHash: "abc",
+	})
+	// Compute the signature the way `loom accept-migration` would.
+	skill.Provenance.Reviewed = true
+	hash, err := CanonicalBodyHash(skill)
+	if err != nil {
+		t.Fatalf("CanonicalBodyHash error = %v", err)
+	}
+	skill.Provenance.ReviewerSignature = hash
+
+	vfs, sanitized := compileDraftSkill(t, skill, "draft-valid-signed")
+
+	executor := &Executor{VFS: vfs}
+	if _, err := executor.Execute(context.Background(), skill, sanitized); err != nil {
+		t.Fatalf("Execute() error = %v, want success for properly signed reviewed skill", err)
+	}
+}
+
+func TestExecutorRefusesReviewedSkillWithMismatchedSignature(t *testing.T) {
+	// Simulates a user who hand-edited "reviewed: true" into the file
+	// without running accept-migration. The signature won't match,
+	// so the executor rejects even under DraftPolicyAllow.
+	skill := draftSkill(&Provenance{
+		Origin:            "openclaw-migrate",
+		Mode:              ProvenanceModeMechanical,
+		SourcePath:        "skills/demo.md",
+		SourceHash:        "abc",
+		Reviewed:          true,
+		ReviewerSignature: "deadbeef_definitely_not_the_right_hash",
+	})
+	vfs, sanitized := compileDraftSkill(t, skill, "draft-bad-sig")
+
+	executor := &Executor{VFS: vfs, DraftPolicy: DraftPolicyAllow}
+	_, err := executor.Execute(context.Background(), skill, sanitized)
+	if err == nil {
+		t.Fatal("Execute() error = nil, want refusal on signature mismatch")
+	}
+	if !strings.Contains(err.Error(), "reviewer_signature") {
+		t.Fatalf("error %q should mention reviewer_signature", err.Error())
 	}
 }
 

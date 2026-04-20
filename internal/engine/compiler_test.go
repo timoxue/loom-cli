@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/yourname/loom-cli/internal/security"
+	"github.com/timoxue/loom-cli/internal/security"
 )
 
 func TestCompilerCompileAndSetupCreatesShadowVFSAndReceipt(t *testing.T) {

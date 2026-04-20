@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/yourname/loom-cli/internal/engine"
+	"github.com/timoxue/loom-cli/internal/engine"
 )
 
 func TestBuildVerificationInputs(t *testing.T) {

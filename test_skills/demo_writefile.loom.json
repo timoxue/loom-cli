@@ -1,6 +1,7 @@
 {
   "schema_version": "v1",
   "skill_id": "demo_writefile",
+  "description": "Write a literal 'hi' into out/hello.txt inside the sandbox. Minimum-viable v1 write demonstrator.",
   "parameters": {
     "msg": {"type": "string", "default_value": "hi", "required": false}
   },

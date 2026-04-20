@@ -7,9 +7,10 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
-	"github.com/yourname/loom-cli/internal/security"
+	"github.com/timoxue/loom-cli/internal/security"
 )
 
 func TestHandleMCPRequestPing(t *testing.T) {
@@ -40,6 +41,11 @@ func TestHandleMCPRequestPing(t *testing.T) {
 	}
 }
 
+// TestHandleMCPRequestToolNotFound confirms that an unknown skill name
+// surfaces as a tool-result with isError: true, not as a JSON-RPC
+// protocol error. The agent must see one uniform failure branch
+// regardless of whether loom couldn't find the skill, rejected it at
+// admission, or failed during execution.
 func TestHandleMCPRequestToolNotFound(t *testing.T) {
 	t.Parallel()
 
@@ -59,15 +65,23 @@ func TestHandleMCPRequestToolNotFound(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	if response.Error == nil {
-		t.Fatal("response.Error = nil, want MCP error")
+	if response.Error != nil {
+		t.Fatalf("response.Error = %#v, want nil (errors surface in result)", response.Error)
 	}
-	if response.Error.Code != -32000 {
-		t.Fatalf("response.Error.Code = %d, want -32000", response.Error.Code)
+	result, ok := response.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("response.Result = %T, want map[string]any", response.Result)
+	}
+	if isError, _ := result["isError"].(bool); !isError {
+		t.Fatalf("result.isError = %#v, want true for missing skill", result["isError"])
 	}
 }
 
-func TestHandleMCPRequestToolCallSuccess(t *testing.T) {
+// TestHandleMCPRequestToolCallRejectsV0 verifies that v0 markdown skills
+// — which parse and admit fine but have no typed Kind — are rejected at
+// the executor boundary with a tool-result-shaped isError response. Commit
+// stays out-of-band: no shadow promotion is possible from this path.
+func TestHandleMCPRequestToolCallRejectsV0(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
 	t.Setenv("USERPROFILE", homeDir)
@@ -97,7 +111,7 @@ description: test skill
 
 	server := &mcpServer{
 		skillsDir:     skillsDir,
-		workspaceRoot: ".",
+		workspaceRoot: t.TempDir(),
 		policy:        security.DefaultPolicy(),
 	}
 
@@ -116,20 +130,26 @@ description: test skill
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
 	if response.Error != nil {
-		t.Fatalf("response.Error = %#v, want nil", response.Error)
+		t.Fatalf("response.Error = %#v, want nil (errors surface in result, not as protocol error)", response.Error)
 	}
 
 	result, ok := response.Result.(map[string]any)
 	if !ok {
 		t.Fatalf("response.Result = %T, want map[string]any", response.Result)
 	}
-	if got := result["status"]; got != "intercepted_and_verified" {
-		t.Fatalf("result[status] = %#v, want intercepted_and_verified", got)
+
+	isErrorValue, _ := result["isError"].(bool)
+	if !isErrorValue {
+		t.Fatalf("result.isError = %#v, want true for v0 skill", result["isError"])
 	}
-	if _, ok := result["shadow_workspace"].(string); !ok {
-		t.Fatalf("result[shadow_workspace] = %#v, want string", result["shadow_workspace"])
+
+	content, ok := result["content"].([]any)
+	if !ok || len(content) == 0 {
+		t.Fatalf("result.content = %#v, want non-empty array", result["content"])
 	}
-	if _, ok := result["logical_hash"].(string); !ok {
-		t.Fatalf("result[logical_hash] = %#v, want string", result["logical_hash"])
+	firstBlock, _ := content[0].(map[string]any)
+	text, _ := firstBlock["text"].(string)
+	if !strings.Contains(text, "not executable") {
+		t.Fatalf("error text = %q, want message containing \"not executable\"", text)
 	}
 }

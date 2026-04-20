@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/yourname/loom-cli/internal/engine"
-	"github.com/yourname/loom-cli/internal/engine/parser"
-	"github.com/yourname/loom-cli/internal/security"
+	"github.com/timoxue/loom-cli/internal/engine"
+	"github.com/timoxue/loom-cli/internal/engine/parser"
+	"github.com/timoxue/loom-cli/internal/security"
 )
 
 // TestCommitRoundTripPromotesSubstitutedContent exercises the whole

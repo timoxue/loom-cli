@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/yourname/loom-cli/internal/security"
+	"github.com/timoxue/loom-cli/internal/security"
 )
 
 // StructureError is a specialized contract error for static skill graph violations.
