@@ -1,4 +1,12 @@
-# Hermes × Loom: Self-Evolution with a Safety Gate
+# Hermes × Loom: The Teacher-Student Model
+
+## One-Line Summary
+
+> **Hermes lets the AI know what to do. Loom ensures the AI can only do what it said it would do, and leaves proof.**
+
+The core pattern: a capable model (the **teacher**) figures out how to do a task once, loom records the verified execution as typed IR, and a cheaper model (the **student**) runs that IR reliably forever — bounded, auditable, cheap.
+
+---
 
 ## What Hermes Is
 
@@ -27,8 +35,8 @@ skill_manage(action="create", name="deseq2-workflow", category="bioinformatics",
 
 - Writes `~/.hermes/skills/bioinformatics/deseq2-workflow/SKILL.md`
 - Runs `skills_guard.py` security scan immediately after write
-- **No human review gate** — if the scan passes, the skill becomes available in the next conversation
-- The skill injects into the LLM's context as a user message (not system prompt), preserving prompt caching
+- **No human review gate** — if the scan passes, the skill is live in the next conversation
+- The skill injects into the LLM's context as a user message, preserving prompt caching
 
 ### Layer 2: Skill Improvement (Patch / Edit)
 
@@ -40,40 +48,11 @@ skill_manage(action="patch", name="deseq2-workflow",
              new_content="--num_recycles 5  # better accuracy on multimers")
 ```
 
-`fuzzy_match.py` handles whitespace/indentation drift. Full rewrites use `action="edit"`. Atomic writes with rollback on scan failure.
+`fuzzy_match.py` handles whitespace/indentation drift. Atomic writes with rollback on scan failure.
 
 ### Layer 3: Cross-Session User Modeling (Honcho)
 
-`optional-skills/autonomous-ai-agents/honcho/` adds dialectic multi-turn reflection:
-- Observes patterns across sessions
-- Tunes recall and summarization
-- User model stored at `~/.hermes/memories/USER.md`
-
----
-
-## How Hermes Calls External Tools
-
-### Built-in Registry
-
-`tools/registry.py` is a singleton. Every `tools/*.py` file calls `registry.register()` at import. `model_tools.py:handle_function_call()` dispatches by name, with parallel execution for independent calls.
-
-### MCP Integration (`tools/mcp_tool.py`)
-
-Hermes is a full MCP client:
-
-```yaml
-# ~/.hermes/config.yaml
-mcp_servers:
-  loom:
-    command: "docker"
-    args: ["run", "--rm", "-i", "-v", "./skills:/loom/skills:ro",
-           "timoxue/loom", "serve", "--port", "8080"]
-    timeout: 120
-```
-
-On startup, Hermes connects to each configured MCP server, calls `initialize` + `tools/list`, and merges discovered tools into its registry alongside built-in tools. When the LLM selects a loom tool, Hermes calls `tools/call` and feeds the result back as a tool message.
-
-**This is the working integration point today.** Any skill in loom's `--skills-dir` becomes a tool available to Hermes's LLM.
+`optional-skills/autonomous-ai-agents/honcho/` adds dialectic multi-turn reflection across sessions. User model stored at `~/.hermes/memories/USER.md`.
 
 ---
 
@@ -93,8 +72,6 @@ On startup, Hermes connects to each configured MCP server, calls `initialize` + 
 └──────────────────────────────────────────────────────┘
 ```
 
-Hermes owns the *intelligence* layer. Loom owns the *execution safety* layer. Neither replaces the other.
-
 ### What Each Layer Owns
 
 | Concern | Owner |
@@ -104,23 +81,75 @@ Hermes owns the *intelligence* layer. Loom owns the *execution safety* layer. Ne
 | Is this skill invocation safe to execute? | **Loom** |
 | What did this invocation actually change? | **Loom** |
 | Should those changes land in the real workspace? | **Loom + human** |
-| Should we record this for compliance? | **Loom** (Receipt) |
+| Compliance audit record | **Loom** (Receipt) |
 | Learn from this task for next time | Hermes (skill patch) |
 
 ---
 
-## The Current Gap: Skill Creation Bypasses Loom
+## The Teacher-Student Pattern
 
-Hermes's `skill_manage(action="create")` writes directly to `~/.hermes/skills/` — no loom involvement. The only gate is `skills_guard.py`'s security scan.
+This is loom's primary value proposition for Hermes users — not "safety gate" but **cost reduction and consistency**.
 
-**Why this matters:** A skill is code. A skill that says "write patient data to `/tmp/export.csv` then `curl` it out" would pass a text-scan but is exactly what loom's capability model is designed to stop. Today, Hermes's self-evolution loop can produce skills that, when later executed, have no capability bounds.
+### The Problem
+
+Hermes users run the same workflows repeatedly:
+- Every run costs Opus-level tokens
+- Results vary run to run (LLM non-determinism)
+- Team members can't reliably reuse each other's workflows
+
+### The Solution
 
 ```
-Hermes creates skill → skills_guard scan → ~/.hermes/skills/  ← no loom
-Later: Hermes invokes skill → loom MCP → typed IR + capability check  ← loom
+Teacher (Claude Opus + Hermes)
+  → Executes task once inside ShadowVFS
+  → loom --record captures every step as typed IR
+  → Human reviews: converts literals to ${params}, confirms scope
+  → loom accept-migration signs the .loom.json
+
+Student (Claude Haiku / any cheap model)
+  → No reasoning needed — just fills parameters
+  → loom run skill.loom.json --input patient=xxx
+  → Executes the fixed IR deterministically
+  → Receipt written automatically
 ```
 
-The gap is between *creation* and *execution*. Loom catches the problem at execution time, but only if the skill was authored as a `.loom.json`. If it stays as a `SKILL.md` context document, loom never sees the individual operations.
+**Why side effects are eliminated:** The student model has no decision authority. It executes a pre-validated, human-reviewed DAG. The capability bounds come from observed teacher execution, not inference.
+
+**Economics:** Teacher runs once (expensive, exploratory). Student runs N times (cheap, deterministic). Loom is the bridge that makes the student's run trustworthy.
+
+### The One Hard Problem: Parameterization
+
+When the teacher executes, loom records literals:
+```
+write_file(path="out/report_patient_001.txt", content="BRCA1 analysis...")
+```
+
+Before the student can reuse this, a human must mark which values are parameters:
+```
+write_file(path="out/report_${patient_id}.txt", content="${gene} analysis...")
+```
+
+This review step is not automatable — it is the human's judgment call about what varies between runs. The `loom accept-migration` gate is exactly where this happens.
+
+---
+
+## Side Effects: What Loom Governs and What It Doesn't
+
+Loom's positioning is **tools + guardrails**. It cannot and should not try to intercept every agent action.
+
+| Side effect | Loom today | Rationale |
+|---|---|---|
+| Filesystem writes | ✅ ShadowVFS + commit gate | Core loom territory |
+| Unauthorized reads | ✅ Capability scope | Core loom territory |
+| Skill creation/edit | ❌ Bypasses loom | Hermes's domain — self-evolution is its value |
+| Memory modification | ❌ Bypasses loom | Hermes's domain |
+| Shell execution | ⚠️ Stub (gap recorded) | Out of scope until `os_command` is built |
+| HTTP calls | ⚠️ Stub (gap recorded) | Out of scope until `http_call` is built |
+| Agent delegation | ❌ Bypasses loom | Harness concern |
+
+**The clean line:** Hermes evolves freely (skill creation, memory, planning). Loom intercepts exactly when execution intent touches the real filesystem.
+
+Hermes's skill creation bypasses loom by design — the `skills_guard.py` text scan is Hermes's gate. Loom's gate fires later, at execution time, when that skill's actions would touch real data.
 
 ---
 
@@ -128,84 +157,85 @@ The gap is between *creation* and *execution*. Loom catches the problem at execu
 
 ### Path 1 (Today, Working)
 
-Loom runs as an MCP server. Hermes connects via `mcp_servers` config. Skills in loom's `--skills-dir` are exposed as tools. Hermes-generated skills that have been migrated and accepted by `loom accept-migration` are fully governed.
+One config line connects Hermes to loom:
 
+```yaml
+# ~/.hermes/config.yaml
+mcp_servers:
+  loom:
+    url: "http://localhost:8080/v1/mcp"
+    timeout: 120
 ```
-hermes claw migrate          # import OpenClaw skills to ~/.hermes/skills/
-loom migrate-openclaw        # translate to typed v1 .loom.json (unreviewed)
-loom accept-migration        # human signs off
-loom serve --skills-dir ./   # expose as MCP tools
-hermes → loom MCP → governed execution
+
+Skills in loom's `--skills-dir` appear as tools in Hermes's registry. Zero other changes needed. Users who want zero friction set `LOOM_DRAFT_POLICY=allow`. Regulated deployments use `refuse`.
+
+### Path 2 (Recording Mode, Near Term)
+
+Teacher executes → loom records → student reuses:
+
+```bash
+# Teacher: execute with recording
+loom run skill.md --record --output recorded.loom.json
+
+# Human reviews: add ${params}, confirm scope
+loom accept-migration recorded.loom.json
+
+# Student: run the recorded IR
+loom run recorded.loom.json --input patient=xxx
 ```
 
-### Path 2 (Near Term)
+### Path 3 (Context Skills, Future)
 
-Hermes creates a new skill → instead of writing to `~/.hermes/skills/` directly, it calls `loom migrate-openclaw` on the generated content → loom produces an unreviewed draft → human runs `loom accept-migration` → skill becomes available. Self-evolution is preserved; execution safety is added.
-
-This requires configuring `skill_manage`'s write target to point at a directory that loom watches, or implementing a thin adapter that wraps `skill_manage` output as a loom MCP call.
-
-### Path 3 (Future)
-
-`skill_context` step kind (see `docs/loose-parser-design.md`): Hermes skills that are pure LLM context documents (not file-operation recipes) run through loom as `skill_context` steps. Every SOP consultation is an auditable Receipt event — required in regulated environments.
+Skills that are pure LLM context documents (not file-operation recipes) run through loom as `skill_context` steps. Every SOP consultation becomes an auditable Receipt event — mandatory in regulated environments.
 
 ---
 
 ## `hermes claw migrate` vs `loom migrate-openclaw`
 
-These two commands look similar but operate at different layers:
-
-| Command | What it does | Output | Safety gate |
+| Command | What it does | Output | Gate |
 |---|---|---|---|
-| `hermes claw migrate` | Copy `SKILL.md` files to `~/.hermes/skills/openclaw-imports/` | `SKILL.md` (unchanged) | `skills_guard.py` text scan |
-| `loom migrate-openclaw` | Translate `SKILL.md` → typed v1 `.loom.json` | Unreviewed `.loom.json` | Parse → validate → `accept-migration` human sign-off |
+| `hermes claw migrate` | Copy `SKILL.md` → `~/.hermes/skills/` | `SKILL.md` unchanged | `skills_guard.py` text scan |
+| `loom migrate-openclaw` | Translate `SKILL.md` → typed v1 `.loom.json` | Unreviewed draft | Parse → validate → human sign-off |
 
-They are complementary. Run `hermes claw migrate` to import skills into Hermes's context system. Run `loom migrate-openclaw` to compile the same skills into governed, executable IR that loom can enforce capability bounds on.
-
----
-
-## Practical Quickstart: Hermes → Loom
-
-```bash
-# 1. Start loom MCP sidecar
-docker run -d -p 8080:8080 \
-  -v ./skills:/loom/skills:ro \
-  -v ./audit-log:/home/loom/.loom \
-  timoxue/loom serve --skills-dir /loom/skills --port 8080
-
-# 2. Configure Hermes to use loom
-cat >> ~/.hermes/config.yaml << 'EOF'
-mcp_servers:
-  loom:
-    url: "http://localhost:8080/v1/mcp"
-    timeout: 120
-EOF
-
-# 3. Hermes now sees loom skills as tools
-hermes "run the deseq2-workflow skill with input file=data.csv"
-# → Hermes selects loom tool, calls tools/call
-# → Loom: parse → validate → ShadowVFS → Receipt
-# → Hermes sees manifest in tool result
-# → User runs: loom commit <session-id> --yes
-```
+Run both. `hermes claw migrate` imports skills into Hermes's context system. `loom migrate-openclaw` compiles the same skills into governed IR that loom enforces capability bounds on.
 
 ---
 
-## OpenClaw Medical Skills and `allowed-tools`
+## OpenClaw Medical Skills: `allowed-tools` Is Already a Capability Declaration
 
-The 869 skills in OpenClaw-Medical-Skills have a key frontmatter field: `allowed-tools`. This is Hermes's capability declaration — it tells the harness which tools the LLM is permitted to call while using this skill.
+869 skills in OpenClaw-Medical-Skills carry `allowed-tools` in frontmatter — Hermes's own capability declaration:
 
 ```yaml
 allowed-tools: Read, Edit, Write, Bash, WebFetch, WebSearch
 ```
 
-Loom's loose parser (see `docs/loose-parser-design.md`) maps this directly to loom capability declarations:
+Loom's loose parser maps this directly, zero NLP:
 
-| `allowed-tools` value | Loom capability | Notes |
+| `allowed-tools` | Loom capability | Notes |
 |---|---|---|
-| `Read`, `Glob`, `Grep` | `vfs.read: /` | Scope narrowed during human review |
-| `Write`, `Edit` | `vfs.write: /` | Scope narrowed during human review |
-| `Bash` | STUB: `os_command` | Capability gap — skill becomes stub |
+| `Read`, `Glob`, `Grep` | `vfs.read: /` | Reviewer narrows scope |
+| `Write`, `Edit` | `vfs.write: /` | Reviewer narrows scope |
+| `Bash` | STUB: `os_command` | Capability gap |
 | `WebFetch`, `WebSearch` | STUB: `http_call` | Capability gap |
 | `Task` | STUB: `agent_call` | Not yet in loom |
 
-343 of 869 skills have `allowed-tools` → 39% can be mechanically converted to loom capability declarations without LLM assistance.
+343 of 869 skills have `allowed-tools` → **39% mechanically convertible** to loom capability declarations, no LLM needed.
+
+---
+
+## Quickstart
+
+```bash
+# 1. Start loom
+docker run -d -p 8080:8080 \
+  -v ./skills:/loom/skills:ro \
+  -v ./audit-log:/home/loom/.loom \
+  timoxue/loom serve --skills-dir /loom/skills --port 8080
+
+# 2. Connect Hermes
+echo "mcp_servers:\n  loom:\n    url: http://localhost:8080/v1/mcp" >> ~/.hermes/config.yaml
+
+# 3. Run — Hermes selects loom tool, executes in shadow, returns manifest
+hermes "run deseq2-workflow with input file=data.csv"
+# → loom commit <session-id> --yes   (when ready to promote)
+```
