@@ -33,17 +33,29 @@ Deterministic AI Gateway
 `
 
 // MCPRequest is the JSON-RPC 2.0 request envelope accepted by the MCP sidecar.
+// Params is raw JSON so each method can unmarshal its own shape without
+// DisallowUnknownFields rejecting legitimate but structurally different methods
+// (e.g. initialize vs tools/call).
 type MCPRequest struct {
 	JSONRPC string          `json:"jsonrpc"`
 	Method  string          `json:"method"`
 	ID      any             `json:"id"`
-	Params  MCPRequestParams `json:"params"`
+	Params  json.RawMessage `json:"params"`
 }
 
-// MCPRequestParams holds tool addressing and strongly stringified arguments.
-type MCPRequestParams struct {
+// MCPToolParams holds tool addressing and strongly stringified arguments.
+type MCPToolParams struct {
 	Name      string            `json:"name"`
 	Arguments map[string]string `json:"arguments"`
+}
+
+// mcpInitializeParams is the client-sent body of the initialize request.
+type mcpInitializeParams struct {
+	ProtocolVersion string `json:"protocolVersion"`
+	ClientInfo      struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+	} `json:"clientInfo"`
 }
 
 // MCPResponse is the JSON-RPC 2.0 response envelope emitted by the MCP sidecar.
@@ -197,6 +209,12 @@ func (s *mcpServer) handleMCPRequest(responseWriter http.ResponseWriter, request
 	}
 
 	switch mcpRequest.Method {
+	case "initialize":
+		s.handleInitialize(responseWriter, mcpRequest)
+	case "initialized":
+		// Notification: no id, no response body expected.
+		responseWriter.WriteHeader(http.StatusOK)
+		_, _ = responseWriter.Write([]byte("{}"))
 	case "ping":
 		writeMCPResponse(responseWriter, http.StatusOK, MCPResponse{
 			JSONRPC: "2.0",
@@ -259,6 +277,26 @@ type loomResultMetadata struct {
 	LogicalHash string          `json:"logical_hash,omitempty"`
 	InputDigest string          `json:"input_digest,omitempty"`
 	Manifest    []engine.Change `json:"manifest,omitempty"`
+}
+
+func (s *mcpServer) handleInitialize(responseWriter http.ResponseWriter, mcpRequest MCPRequest) {
+	var params mcpInitializeParams
+	_ = json.Unmarshal(mcpRequest.Params, &params)
+
+	protocolVersion := params.ProtocolVersion
+	if protocolVersion == "" {
+		protocolVersion = "2024-11-05"
+	}
+
+	writeMCPResponse(responseWriter, http.StatusOK, MCPResponse{
+		JSONRPC: "2.0",
+		ID:      mcpRequest.ID,
+		Result: map[string]any{
+			"protocolVersion": protocolVersion,
+			"capabilities":    map[string]any{"tools": map[string]any{}},
+			"serverInfo":      map[string]any{"name": "loom", "version": "0.1.0"},
+		},
+	})
 }
 
 // handleToolsList walks the skills directory, parses each file, and
@@ -380,7 +418,13 @@ func parameterTypeToJSONSchemaType(pt engine.ParameterType) string {
 // returned _loom.session_id is what the operator runs `loom commit`
 // against, on the host.
 func (s *mcpServer) handleToolCall(responseWriter http.ResponseWriter, mcpRequest MCPRequest) {
-	skillName := strings.TrimSpace(mcpRequest.Params.Name)
+	var toolParams MCPToolParams
+	if err := json.Unmarshal(mcpRequest.Params, &toolParams); err != nil {
+		writeToolResultError(responseWriter, mcpRequest.ID, "invalid tool call params")
+		return
+	}
+
+	skillName := strings.TrimSpace(toolParams.Name)
 	if skillName == "" {
 		writeToolResultError(responseWriter, mcpRequest.ID, "tool name must not be empty")
 		return
@@ -413,7 +457,7 @@ func (s *mcpServer) handleToolCall(responseWriter http.ResponseWriter, mcpReques
 		return
 	}
 
-	shadowVFS, sanitizedInputs, err := compiler.CompileAndSetup(skill, mcpRequest.Params.Arguments, sessionID)
+	shadowVFS, sanitizedInputs, err := compiler.CompileAndSetup(skill, toolParams.Arguments, sessionID)
 	if err != nil {
 		writeToolResultError(responseWriter, mcpRequest.ID, fmt.Sprintf("admission failed: %v", err))
 		return

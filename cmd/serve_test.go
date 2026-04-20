@@ -153,3 +153,59 @@ description: test skill
 		t.Fatalf("error text = %q, want message containing \"not executable\"", text)
 	}
 }
+
+func TestHandleMCPInitialize(t *testing.T) {
+	t.Parallel()
+
+	server := &mcpServer{
+		skillsDir:     t.TempDir(),
+		workspaceRoot: ".",
+		policy:        security.DefaultPolicy(),
+	}
+
+	body := []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","clientInfo":{"name":"hermes","version":"1.0.0"}}}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/mcp", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	server.handleMCPRequest(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var resp MCPResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Error != nil {
+		t.Fatalf("unexpected error: %+v", resp.Error)
+	}
+	result, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("result type = %T, want map", resp.Result)
+	}
+	if result["protocolVersion"] != "2024-11-05" {
+		t.Fatalf("protocolVersion = %v, want 2024-11-05", result["protocolVersion"])
+	}
+	info, _ := result["serverInfo"].(map[string]any)
+	if info["name"] != "loom" {
+		t.Fatalf("serverInfo.name = %v, want loom", info["name"])
+	}
+}
+
+func TestHandleMCPInitializedNotification(t *testing.T) {
+	t.Parallel()
+
+	server := &mcpServer{
+		skillsDir:     t.TempDir(),
+		workspaceRoot: ".",
+		policy:        security.DefaultPolicy(),
+	}
+
+	body := []byte(`{"jsonrpc":"2.0","method":"initialized","params":{}}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/mcp", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	server.handleMCPRequest(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+}
